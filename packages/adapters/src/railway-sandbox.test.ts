@@ -376,6 +376,28 @@ describe("Railway computers", () => {
     }
   });
 
+  it("bounds concurrent reads when files grow after listing", async () => {
+    const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    sandbox.exec.mockResolvedValue({
+      exitCode: 0,
+      stdout: [0, 1, 2, 3].map((index) => `file-${index}\0${600}\0${2}\0`).join(""),
+    });
+    let reserved = 0;
+    sandbox.files.read.mockImplementation(async (_path, options) => {
+      reserved += options.length;
+      return new Uint8Array(options.length);
+    });
+    try {
+      await expect(provider.exportWorkspace(computer, ctx).next()).rejects.toThrow(
+        "grew during export",
+      );
+      expect(reserved).toBe(12);
+      expect(sandbox.files.read).toHaveBeenCalledTimes(4);
+    } finally {
+      stopBrowsers.mockRestore();
+    }
+  });
+
   it.each(["0", "-1", "1.5", "invalid"])("rejects an invalid export limit %s", (limit) => {
     expect(
       () =>

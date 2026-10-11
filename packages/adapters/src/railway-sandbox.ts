@@ -252,8 +252,8 @@ export class RailwaySandboxProvider implements SandboxProvider {
       throw new Error("could not list Railway workspace");
     const entries = result.stdout.split("\0");
     const sandbox = await this.connect(computer, context);
-    const batches: Array<Array<{ path: string; executable: boolean }>> = [];
-    let files: Array<{ path: string; executable: boolean }> = [];
+    const batches: Array<Array<{ path: string; executable: boolean; size: number }>> = [];
+    let files: Array<{ path: string; executable: boolean; size: number }> = [];
     let batchBytes = 0;
     for (let index = 0; index + 2 < entries.length; index += 3) {
       const filePath = entries[index];
@@ -274,6 +274,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
       }
       files.push({
         path: filePath,
+        size,
         executable: (Number.parseInt(mode, 8) & 0o111) !== 0,
       });
       batchBytes += size;
@@ -286,11 +287,13 @@ export class RailwaySandboxProvider implements SandboxProvider {
           try {
             const content = await sandbox.files.read(workspacePath(WORKSPACE, file.path), {
               format: "bytes",
-              length: this.maxWorkspaceFileBytes + 1,
+              length: file.size + 1,
             });
             if (content.byteLength > this.maxWorkspaceFileBytes)
               throw new Error(`Railway workspace file exceeds ${this.maxWorkspaceFileBytes} bytes`);
-            return { ...file, content };
+            if (content.byteLength > file.size)
+              throw new Error("Railway workspace file grew during export; retry the checkpoint");
+            return { path: file.path, executable: file.executable, content };
           } catch (error) {
             if (error instanceof SandboxFileNotFoundError) return undefined;
             throw error;
