@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +8,7 @@ import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LinuxDesktop } from "./linux-desktop.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
+import { assertSandboxWorkspaceContract } from "./sandbox-test-support.js";
 
 vi.mock("railway", () => ({
   Sandbox: { create: vi.fn(), connect: vi.fn() },
@@ -46,6 +47,50 @@ beforeEach(() => {
 });
 
 describe("Railway computers", () => {
+  it("satisfies the shared workspace contract through the Railway SDK", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "rakazo-railway-contract-"));
+    const localPath = (filePath: string) => filePath.replace("/home/rakazo", directory);
+    sandbox.files.write.mockImplementation(
+      async (filePath: string, content: Uint8Array, options: { mode: number }) => {
+        await mkdir(path.dirname(localPath(filePath)), { recursive: true });
+        await writeFile(localPath(filePath), content, options);
+      },
+    );
+    sandbox.files.read.mockImplementation(
+      async (filePath: string) => new Uint8Array(await readFile(localPath(filePath))),
+    );
+    sandbox.files.list.mockImplementation(async (filePath: string) =>
+      Promise.all(
+        (await readdir(localPath(filePath))).map(async (name) => {
+          const entry = await stat(path.join(localPath(filePath), name));
+          return { name, isDir: entry.isDirectory(), size: entry.size, mode: entry.mode };
+        }),
+      ),
+    );
+    sandbox.exec.mockImplementation(async (command: string) => {
+      if (command.includes("find . -type f -print0") || command.startsWith("'echo'")) {
+        const result = await promisify(execFile)("bash", [
+          "-c",
+          command.replaceAll("/home/rakazo", directory),
+        ]);
+        return { ...result, exitCode: 0 };
+      }
+      return {
+        exitCode: 0,
+        stdout: command.includes("RAKAZO_DESKTOP=")
+          ? "RAKAZO_DESKTOP=0:test-token"
+          : command.includes("CURSOR")
+            ? "aW1hZ2U=\nCURSOR X=1 Y=2"
+            : "",
+      };
+    });
+    try {
+      await assertSandboxWorkspaceContract(provider, computer, ctx);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reuses an existing computer without marking its workspace fresh", async () => {
     expect(
       await provider.provision(
