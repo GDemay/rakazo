@@ -26,6 +26,9 @@ describe("search helpers", () => {
     expect(extractLinksFromText("(https://example.com/a_(b)).")).toEqual([
       "https://example.com/a_(b)",
     ]);
+    expect(
+      extractLinksFromText("**[docs](https://example.com/docs)** and ((https://x.test/y)))"),
+    ).toEqual(["https://example.com/docs", "https://x.test/y"]);
   });
 
   it("matches case-insensitive substrings", () => {
