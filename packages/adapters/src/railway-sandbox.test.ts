@@ -376,23 +376,33 @@ describe("Railway computers", () => {
     }
   });
 
-  it("bounds concurrent reads when files grow after listing", async () => {
+  it("retries growing files separately within the read budget", async () => {
     const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    const bounded = new RailwaySandboxProvider({
+      token: "test",
+      environmentId: "environment",
+      maxWorkspaceFileBytes: "8",
+    });
     sandbox.exec.mockResolvedValue({
       exitCode: 0,
       stdout: [0, 1, 2, 3].map((index) => `file-${index}\0${600}\0${2}\0`).join(""),
     });
     let reserved = 0;
+    let peak = 0;
     sandbox.files.read.mockImplementation(async (_path, options) => {
       reserved += options.length;
-      return new Uint8Array(options.length);
+      peak = Math.max(peak, reserved);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      reserved -= options.length;
+      return new Uint8Array(Math.min(8, options.length));
     });
     try {
-      await expect(provider.exportWorkspace(computer, ctx).next()).rejects.toThrow(
-        "grew during export",
-      );
-      expect(reserved).toBe(12);
-      expect(sandbox.files.read).toHaveBeenCalledTimes(4);
+      const files = [];
+      for await (const file of bounded.exportWorkspace(computer, ctx)) files.push(file);
+      expect(files).toHaveLength(4);
+      expect(files.map((file) => file.content.byteLength)).toEqual([8, 8, 8, 8]);
+      expect(peak).toBe(12);
+      expect(sandbox.files.read).toHaveBeenCalledTimes(8);
     } finally {
       stopBrowsers.mockRestore();
     }
