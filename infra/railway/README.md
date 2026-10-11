@@ -1,10 +1,12 @@
-# Rakazo on Railway
+# Deploy and Host Rakazo on Railway
+
+## About Hosting Rakazo
 
 The template runs Rakazo, PostgreSQL and agent computers on Railway. No Docker host or separate sandbox provider is needed. Railway usage and any connected model provider are billed separately.
 
 ## Deploy
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/lugj-u)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/rakazo-template)
 
 1. Deploy the template. Enter your email in `OWNER_EMAIL` and a Railway workspace or account API token in `RAILWAY_API_TOKEN`.
 2. Wait for Rakazo to become healthy. Open its generated HTTPS domain.
@@ -13,7 +15,7 @@ The template runs Rakazo, PostgreSQL and agent computers on Railway. No Docker h
 
 The token must be able to create environments and sandboxes in the project. Prefer a dedicated Railway workspace. Never place it in a bot's files or model connection settings.
 
-## Defaults
+## Why Deploy Rakazo on Railway
 
 - The owner account is created before the public web server starts. Public registration is closed on every start; this template is intended for a personal deployment.
 - Every install gets separate random database, authentication, encryption, screen and initial owner secrets. Keep the encryption key and database password stable across redeploys.
@@ -31,4 +33,14 @@ Back up PostgreSQL, `/data`, and `ENCRYPTION_KEY` before upgrades. Railway volum
 
 The sandbox environment is separate from the app environment. Do not put trusted services or secrets there. If you delete the application project, check for and remove its remaining computers.
 
+## Common Use Cases
+
+A personal AI assistant with browser access, persistent files and scheduled tasks. Choose your model through Rakazo's connection settings.
+
+## Dependencies for Rakazo
+
 The template cannot generate a Railway API credential or a model account for you. These are the only outside account setup steps; no third-party sandbox service is required.
+
+### Deployment Dependencies
+
+The template supplies Node.js 22, PostgreSQL 16, the application image and two persistent volumes. Railway supplies HTTPS and sandbox computers. No local software installation is needed.
