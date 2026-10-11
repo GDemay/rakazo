@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ComputerRef, ProcessEvent } from "@rakazo/adapter-kit";
 import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import WebSocket from "ws";
 import { LinuxDesktop } from "./linux-desktop.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
 import { assertSandboxWorkspaceContract } from "./sandbox-test-support.js";
@@ -47,6 +49,31 @@ beforeEach(() => {
 });
 
 describe("Railway computers", () => {
+  it("closes a rejected SDK WebSocket handshake without re-entering its error handler", async () => {
+    await provider.provision({ botId: "bot", homePath: "/unused" }, ctx);
+    const Socket = vi.mocked(Sandbox.create).mock.calls[0]?.[0]?.webSocketImpl;
+    if (!Socket) throw new Error("Railway WebSocket transport is missing");
+    const server = createServer((_request, response) => response.writeHead(403).end());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Server did not bind");
+      const socket = new Socket(`ws://127.0.0.1:${address.port}`);
+      if (!(socket instanceof WebSocket)) throw new Error("Unexpected WebSocket transport");
+      const onError = vi.fn(() => socket.close(1000, ""));
+      socket.onerror = onError;
+      await new Promise<void>((resolve) => {
+        socket.onclose = () => resolve();
+      });
+      expect(onError).toHaveBeenCalledOnce();
+      expect(socket.readyState).toBe(WebSocket.CLOSED);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
   it("satisfies the shared workspace contract through the Railway SDK", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "rakazo-railway-contract-"));
     const localPath = (filePath: string) => filePath.replace("/home/rakazo", directory);

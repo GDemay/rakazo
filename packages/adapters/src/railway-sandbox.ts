@@ -15,6 +15,7 @@ import type {
 } from "@rakazo/adapter-kit";
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
 import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway";
+import WebSocket from "ws";
 import { normalizeWorkspacePath, shellQuote, workspacePath } from "./computer-support.js";
 import {
   PORTABLE_TRANSFER_BATCH_BYTES,
@@ -52,7 +53,12 @@ export class RailwaySandboxProvider implements SandboxProvider {
     },
   });
 
-  constructor(private readonly options: RailwaySandboxOptions) {}
+  private readonly options: RailwaySandboxOptions & { webSocketImpl: typeof WebSocket };
+
+  constructor(options: RailwaySandboxOptions) {
+    // Node's native WebSocket can recurse when the SDK closes a failed handshake.
+    this.options = { ...options, webSocketImpl: WebSocket };
+  }
 
   describe() {
     return {
