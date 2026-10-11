@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ComputerRef, ProcessEvent } from "@rakazo/adapter-kit";
-import { Sandbox, SandboxNotFoundError } from "railway";
+import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LinuxDesktop } from "./linux-desktop.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
@@ -12,6 +12,7 @@ import { RailwaySandboxProvider } from "./railway-sandbox.js";
 vi.mock("railway", () => ({
   Sandbox: { create: vi.fn(), connect: vi.fn() },
   SandboxNotFoundError: class extends Error {},
+  SandboxFileNotFoundError: class extends Error {},
 }));
 
 const ctx = {
@@ -256,6 +257,61 @@ describe("Railway computers", () => {
       expect(sandbox.files.write).toHaveBeenCalledTimes(20);
       expect(peakBytes).toBeGreaterThan(content.byteLength);
       expect(peakBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    } finally {
+      stopBrowsers.mockRestore();
+    }
+  });
+
+  it("exports oversized files alone and limits the bytes read together", async () => {
+    const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    const sizes = [3, 3, 3, 12, 3, 3].map((size) => size * 1024 * 1024);
+    sandbox.exec.mockResolvedValue({
+      exitCode: 0,
+      stdout: sizes.map((size, index) => `file-${index}\0${600}\0${size}\0`).join(""),
+    });
+    let activeBytes = 0;
+    let peakBytes = 0;
+    sandbox.files.read.mockImplementation(async (filePath: string) => {
+      const size = sizes[Number(filePath.split("-").at(-1))];
+      if (size === undefined) throw new Error("Unexpected file");
+      activeBytes += size;
+      expect(activeBytes).toBeLessThanOrEqual(Math.max(size, 8 * 1024 * 1024));
+      peakBytes = Math.max(peakBytes, activeBytes);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      activeBytes -= size;
+      return new Uint8Array(size);
+    });
+    try {
+      const lengths = [];
+      for await (const file of provider.exportWorkspace(computer, ctx))
+        lengths.push(file.content.byteLength);
+      expect(lengths).toEqual(sizes);
+      expect(peakBytes).toBe(12 * 1024 * 1024);
+    } finally {
+      stopBrowsers.mockRestore();
+    }
+  });
+
+  it("skips a file removed during export but preserves other read failures", async () => {
+    const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    sandbox.exec.mockResolvedValue({
+      exitCode: 0,
+      stdout: "gone\u0000600\u00001\u0000kept\u0000600\u00001\u0000",
+    });
+    const content = Uint8Array.of(7);
+    sandbox.files.read
+      .mockRejectedValueOnce(
+        new SandboxFileNotFoundError({ operation: "read", path: "gone", message: "missing" }),
+      )
+      .mockResolvedValue(content);
+    try {
+      const files = [];
+      for await (const file of provider.exportWorkspace(computer, ctx)) files.push(file);
+      expect(files).toEqual([{ path: "kept", content, executable: false }]);
+      sandbox.files.read.mockRejectedValue(new Error("transfer failed"));
+      await expect(provider.exportWorkspace(computer, ctx).next()).rejects.toThrow(
+        "transfer failed",
+      );
     } finally {
       stopBrowsers.mockRestore();
     }

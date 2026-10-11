@@ -34,11 +34,14 @@ describe("sandbox conformance", () => {
     const daytona = new DaytonaSandboxEmulator();
     const box = new BoxSandboxEmulator();
     const desktop = new DesktopSandboxProvider();
+    const railway = new ManagedSandboxEmulator({ id: "railway-emulator", kind: "railway" });
     const a = await provisionPrepared(fake, { botId: "bot-a", homePath: "/tmp/a" }, ctx);
     const b = await provisionPrepared(managed, { botId: "bot-b", homePath: "/tmp/b" }, ctx);
     const c = await provisionPrepared(daytona, { botId: "bot-c", homePath: "/tmp/c" }, ctx);
     const d = await provisionPrepared(box, { botId: "bot-d", homePath: "/tmp/d" }, ctx);
     const e = await provisionPrepared(desktop, { botId: "bot-e", homePath: "/tmp/e" }, ctx);
+    const f = await provisionPrepared(railway, { botId: "bot-f", homePath: "/tmp/f" }, ctx);
+    const outF = await drain(railway, f);
     const outA = await drain(fake, a);
     const outB = await drain(managed, b);
     const outC = await drain(daytona, c);
@@ -49,7 +52,9 @@ describe("sandbox conformance", () => {
     expect(outC).toContain("graphical-ok");
     expect(outD).toContain("graphical-ok");
     expect(outE).toContain("graphical-ok");
-    expect(new Set([a.id, b.id, c.id, d.id, e.id]).size).toBe(5);
+    expect(outF).toContain("graphical-ok");
+    expect(new Set([a.id, b.id, c.id, d.id, e.id, f.id]).size).toBe(6);
+    await railway.destroy(f, ctx);
     await fake.destroy(a, ctx);
     await managed.destroy(b, ctx);
     await daytona.destroy(c, ctx);
@@ -61,6 +66,7 @@ describe("sandbox conformance", () => {
     const providers: SandboxProvider[] = [
       new FakeSandboxProvider(),
       new ManagedSandboxEmulator(),
+      new ManagedSandboxEmulator({ id: "railway-emulator", kind: "railway" }),
       new DaytonaSandboxEmulator(),
       new BoxSandboxEmulator(),
       new DesktopSandboxProvider(),
@@ -122,6 +128,7 @@ describe("sandbox conformance", () => {
     const providers: SandboxProvider[] = [
       new FakeSandboxProvider(),
       new ManagedSandboxEmulator(),
+      new ManagedSandboxEmulator({ id: "railway-emulator", kind: "railway" }),
       new DaytonaSandboxEmulator(),
       new BoxSandboxEmulator(),
       new DesktopSandboxProvider({ root }),
@@ -292,6 +299,7 @@ describe("sandbox conformance", () => {
     const providers: SandboxProvider[] = [
       new FakeSandboxProvider(),
       new ManagedSandboxEmulator(),
+      new ManagedSandboxEmulator({ id: "railway-emulator", kind: "railway" }),
       new DaytonaSandboxEmulator(),
       new BoxSandboxEmulator(),
       new DesktopSandboxProvider({ root }),

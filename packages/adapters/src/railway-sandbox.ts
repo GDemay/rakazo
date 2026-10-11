@@ -14,7 +14,7 @@ import type {
   TerminalRequest,
 } from "@rakazo/adapter-kit";
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
-import { Sandbox, SandboxNotFoundError } from "railway";
+import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway";
 import { normalizeWorkspacePath, shellQuote, workspacePath } from "./computer-support.js";
 import {
   PORTABLE_TRANSFER_BATCH_BYTES,
@@ -226,7 +226,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
         `cd ${shellQuote(WORKSPACE)}`,
         'find . -type f -print0 | while IFS= read -r -d "" entry; do',
         '  if [ -x "$entry" ]; then mode=700; else mode=600; fi',
-        `  printf '%s\\0%s\\0' "\${entry#./}" "$mode"`,
+        `  printf '%s\\0%s\\0%s\\0' "\${entry#./}" "$mode" "$(wc -c < "$entry")"`,
         "done",
       ].join("\n"),
       context,
@@ -235,27 +235,47 @@ export class RailwaySandboxProvider implements SandboxProvider {
       throw new Error("could not list Railway workspace");
     const entries = result.stdout.split("\0");
     const sandbox = await this.connect(computer, context);
-    const files: Array<{ path: string; executable: boolean }> = [];
-    for (let index = 0; index + 1 < entries.length; index += 2) {
+    const batches: Array<Array<{ path: string; executable: boolean }>> = [];
+    let files: Array<{ path: string; executable: boolean }> = [];
+    let batchBytes = 0;
+    for (let index = 0; index + 2 < entries.length; index += 3) {
       const filePath = entries[index];
       const mode = entries[index + 1];
       if (!filePath || !mode || shouldSkipPortableWorkspaceFile(filePath)) continue;
+      const size = Number(entries[index + 2]);
+      if (
+        files.length &&
+        (files.length >= 8 || batchBytes + size > PORTABLE_TRANSFER_BATCH_BYTES)
+      ) {
+        batches.push(files);
+        files = [];
+        batchBytes = 0;
+      }
       files.push({
         path: filePath,
         executable: (Number.parseInt(mode, 8) & 0o111) !== 0,
       });
+      batchBytes += size;
     }
-    for (let index = 0; index < files.length; index += 8) {
+    if (files.length) batches.push(files);
+    for (const files of batches) {
       context.signal.throwIfAborted();
       const batch = await Promise.all(
-        files.slice(index, index + 8).map(async (file) => ({
-          ...file,
-          content: await sandbox.files.read(workspacePath(WORKSPACE, file.path), {
-            format: "bytes",
-          }),
-        })),
+        files.map(async (file) => {
+          try {
+            return {
+              ...file,
+              content: await sandbox.files.read(workspacePath(WORKSPACE, file.path), {
+                format: "bytes",
+              }),
+            };
+          } catch (error) {
+            if (error instanceof SandboxFileNotFoundError) return undefined;
+            throw error;
+          }
+        }),
       );
-      for (const file of batch) yield file;
+      for (const file of batch) if (file) yield file;
     }
   }
 
