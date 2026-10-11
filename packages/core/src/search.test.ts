@@ -31,6 +31,13 @@ describe("search helpers", () => {
     ).toEqual(["https://example.com/docs", "https://x.test/y"]);
   });
 
+  it("keeps adjacent wrapped links", () => {
+    expect(extractLinksFromText("(https://example.com/a),(https://example.com/b)")).toEqual([
+      "https://example.com/a",
+      "https://example.com/b",
+    ]);
+  });
+
   it("matches case-insensitive substrings", () => {
     expect(matchesSearchQuery("Venue", "Research venues")).toBe(true);
     expect(matchesSearchQuery("missing", "Research venues")).toBe(false);
