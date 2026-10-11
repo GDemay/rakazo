@@ -38,6 +38,12 @@ describe("search helpers", () => {
     ]);
   });
 
+  it("ignores a bare scheme after an unmatched closing parenthesis", () => {
+    expect(extractLinksFromText("https://example.com/docs)https://")).toEqual([
+      "https://example.com/docs",
+    ]);
+  });
+
   it("handles thousands of adjacent wrapped links without recursing", () => {
     const text = "(https://x.test/),".repeat(50_000);
     expect(extractLinksFromText(text)).toEqual(["https://x.test/"]);

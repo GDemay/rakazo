@@ -1,6 +1,6 @@
 const URL_PATTERN = /https?:\/\/[^\s<>"'\]]+/gi;
 
-const URL_START = /https?:\/\//gi;
+const URL_START = /https?:\/\/[^\s<>"'\]]/gi;
 
 function linkEnd(text: string, start: number, limit: number): number {
   let depth = 0;
