@@ -77,7 +77,7 @@ The installer downloads the Compose files, creates `.env` with random secrets, a
 It preserves an existing `.env` when rerun.
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173), create an account, and connect a model.
-Local Docker computers are on by default. Optional remote providers: `e2b`, `daytona`, `createos`, or `box`
+Local Docker computers are on by default. Optional remote providers: `e2b`, `daytona`, `createos`, `box`, or `railway`
 with the matching API key.
 
 Default image tag is `edge` (main builds, `linux/amd64` + `linux/arm64`). Details and tags:
@@ -168,6 +168,15 @@ To use CreateOS, set `SANDBOX_PROVIDER=createos` and `CREATEOS_SANDBOX_API_KEY`.
 Optional `CREATEOS_SANDBOX_BASE_URL`, `CREATEOS_SANDBOX_SHAPE`, and
 `CREATEOS_SANDBOX_ROOTFS` default to `https://api.sb.createos.sh`, `s-2vcpu-2gb`,
 and `desktop:1`.
+
+To use Railway computers, set `SANDBOX_PROVIDER=railway`, `RAILWAY_API_TOKEN`
+(a workspace or account API token), and `RAILWAY_ENVIRONMENT_ID` on the API and
+worker. Railway supplies the environment ID automatically for hosted services.
+Computers run in the selected Railway environment and share its private network.
+Use a separate environment if computers must not reach other private services.
+The desktop is installed on first start. Stopping a computer saves its portable
+home and destroys the sandbox; the next start restores that home in a new sandbox.
+Railway sandbox usage is metered.
 
 ## Desktop and mobile
 
