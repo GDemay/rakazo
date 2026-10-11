@@ -308,6 +308,13 @@ export class RailwaySandboxProvider implements SandboxProvider {
   ) {
     await this.desktops.stopBrowsers(computer, context);
     const sandbox = await this.connect(computer, context);
+    // SDK uploads default to 0644; the private parent also protects interrupted restores.
+    const privacy = await sandbox.exec(`chmod 700 -- ${shellQuote(WORKSPACE)}`, {
+      timeoutSec: 30,
+      signal: context.signal,
+    });
+    if (privacy.exitCode !== 0 || privacy.timedOut)
+      throw new Error("could not protect Railway workspace permissions");
     let batch: PortableFile[] = [];
     let batchBytes = 0;
     const permissions = new Map<number, string[]>([

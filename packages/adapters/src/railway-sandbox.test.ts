@@ -296,6 +296,16 @@ describe("Railway computers", () => {
       }
       await provider.importWorkspace(computer, files(), ctx);
       expect(Sandbox.connect).toHaveBeenCalledTimes(1);
+      expect(sandbox.exec).toHaveBeenNthCalledWith(
+        1,
+        "chmod 700 -- '/home/rakazo'",
+        expect.objectContaining({ signal: ctx.signal }),
+      );
+      const protectOrder = sandbox.exec.mock.invocationCallOrder[0];
+      const writeOrder = sandbox.files.write.mock.invocationCallOrder[0];
+      if (protectOrder === undefined || writeOrder === undefined)
+        throw new Error("Missing restore operations");
+      expect(protectOrder).toBeLessThan(writeOrder);
       expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/bin/tool", content);
       expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/note", content);
       expect(sandbox.exec).toHaveBeenCalledWith(
@@ -328,10 +338,12 @@ describe("Railway computers", () => {
       await provider.importWorkspace(computer, files(), ctx);
       expect(sandbox.files.write).toHaveBeenCalledTimes(130);
       expect(peak).toBe(4);
-      expect(sandbox.exec).toHaveBeenCalledTimes(3);
+      expect(sandbox.exec).toHaveBeenCalledTimes(4);
       expect(sandbox.files.write.mock.calls.every((call) => call[2] === undefined)).toBe(true);
+      sandbox.files.write.mockClear();
       sandbox.exec.mockResolvedValue({ exitCode: 1, stdout: "", stderr: "denied" });
       await expect(provider.importWorkspace(computer, files(), ctx)).rejects.toThrow("permissions");
+      expect(sandbox.files.write).not.toHaveBeenCalled();
     } finally {
       stopBrowsers.mockRestore();
     }
