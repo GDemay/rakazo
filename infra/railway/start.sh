@@ -19,14 +19,17 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 pnpm --filter @rakazo/api start &
 pnpm --filter @rakazo/worker start &
-node --input-type=module -e '
+(
+  node --input-type=module -e '
   for (let attempt = 0; attempt < 60; attempt++) {
-    const ready = await fetch("http://127.0.0.1:3100/ready").then(r => r.ok).catch(() => false);
+    const ready = await fetch("http://127.0.0.1:3100/ready", { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false);
     if (ready) process.exit(0);
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   throw new Error("API did not become ready");
 '
-pnpm --filter @rakazo/web preview --host 0.0.0.0 --port 5173 &
+  exec env -u RAILWAY_API_TOKEN -u DATABASE_URL -u ENCRYPTION_KEY -u BETTER_AUTH_SECRET \
+    pnpm --filter @rakazo/web preview --host 0.0.0.0 --port 5173
+) &
 wait -n
 exit 1
