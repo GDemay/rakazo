@@ -38,6 +38,11 @@ describe("search helpers", () => {
     ]);
   });
 
+  it("handles thousands of adjacent wrapped links without recursing", () => {
+    const text = "(https://x.test/),".repeat(50_000);
+    expect(extractLinksFromText(text)).toEqual(["https://x.test/"]);
+  });
+
   it("matches case-insensitive substrings", () => {
     expect(matchesSearchQuery("Venue", "Research venues")).toBe(true);
     expect(matchesSearchQuery("missing", "Research venues")).toBe(false);
