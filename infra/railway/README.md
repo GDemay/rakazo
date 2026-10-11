@@ -22,7 +22,7 @@ The token must be able to create environments and sandboxes in the project. Pref
 - PostgreSQL has no public endpoint. Only the web port is published; the API binds to loopback.
 - Computers run in a separate, empty Railway environment, so they cannot reach the application's private database network. Startup creates this environment automatically and reuses it on restart.
 - App processes run as the unprivileged `node` user. The entrypoint briefly uses root to set the mounted volume's owner, then drops privileges.
-- The API, worker and web share one service and `/data` volume. PostgreSQL has its own volume. Both volumes have daily backups enabled. Run one application replica; do not enable service sleeping.
+- The API, worker and web share one service and `/data` volume. PostgreSQL has its own volume. The template requests daily backups for both volumes; Railway requires a Pro workspace to use managed backups. Run one application replica; do not enable service sleeping.
 - Any process failure restarts the application service. Database migrations finish before startup. Idle computers stop after ten minutes; each user can create up to three computers.
 
 ## Updates and backups
