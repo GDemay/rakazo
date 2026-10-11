@@ -16,6 +16,7 @@ import type {
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
 import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway";
 import WebSocket from "ws";
+import { z } from "zod";
 import { normalizeWorkspacePath, shellQuote, workspacePath } from "./computer-support.js";
 import {
   PORTABLE_TRANSFER_BATCH_BYTES,
@@ -30,6 +31,7 @@ const SCREEN_PORT = 6080;
 export interface RailwaySandboxOptions {
   token: string;
   environmentId: string;
+  maxWorkspaceFileBytes?: string;
 }
 
 export class RailwaySandboxProvider implements SandboxProvider {
@@ -55,7 +57,16 @@ export class RailwaySandboxProvider implements SandboxProvider {
 
   private readonly options: RailwaySandboxOptions & { webSocketImpl: typeof WebSocket };
 
-  constructor(options: RailwaySandboxOptions) {
+  private readonly maxWorkspaceFileBytes: number;
+
+  constructor({ maxWorkspaceFileBytes, ...options }: RailwaySandboxOptions) {
+    this.maxWorkspaceFileBytes = z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER - 1)
+      .default(64 * 1024 * 1024)
+      .parse(maxWorkspaceFileBytes);
     // Node's native WebSocket can recurse when the SDK closes a failed handshake.
     this.options = { ...options, webSocketImpl: WebSocket };
   }
@@ -249,9 +260,13 @@ export class RailwaySandboxProvider implements SandboxProvider {
       const mode = entries[index + 1];
       if (!filePath || !mode || shouldSkipPortableWorkspaceFile(filePath)) continue;
       const size = Number(entries[index + 2]);
+      if (!Number.isSafeInteger(size) || size < 0 || size > this.maxWorkspaceFileBytes)
+        throw new Error(
+          `Railway workspace file exceeds ${this.maxWorkspaceFileBytes} bytes or has an invalid size`,
+        );
       if (
         files.length &&
-        (files.length >= 8 || batchBytes + size > PORTABLE_TRANSFER_BATCH_BYTES)
+        (files.length >= 4 || batchBytes + size > PORTABLE_TRANSFER_BATCH_BYTES)
       ) {
         batches.push(files);
         files = [];
@@ -269,12 +284,13 @@ export class RailwaySandboxProvider implements SandboxProvider {
       const batch = await Promise.all(
         files.map(async (file) => {
           try {
-            return {
-              ...file,
-              content: await sandbox.files.read(workspacePath(WORKSPACE, file.path), {
-                format: "bytes",
-              }),
-            };
+            const content = await sandbox.files.read(workspacePath(WORKSPACE, file.path), {
+              format: "bytes",
+              length: this.maxWorkspaceFileBytes + 1,
+            });
+            if (content.byteLength > this.maxWorkspaceFileBytes)
+              throw new Error(`Railway workspace file exceeds ${this.maxWorkspaceFileBytes} bytes`);
+            return { ...file, content };
           } catch (error) {
             if (error instanceof SandboxFileNotFoundError) return undefined;
             throw error;
@@ -294,26 +310,42 @@ export class RailwaySandboxProvider implements SandboxProvider {
     const sandbox = await this.connect(computer, context);
     let batch: PortableFile[] = [];
     let batchBytes = 0;
+    const permissions = new Map<number, string[]>([
+      [0o600, []],
+      [0o700, []],
+    ]);
     const flush = async () => {
       context.signal.throwIfAborted();
+      // Passing mode makes the SDK open an exec connection for every file.
       await Promise.all(
-        batch.map((file) =>
-          sandbox.files.write(workspacePath(WORKSPACE, file.path), file.content, {
-            mode: file.executable ? 0o700 : 0o600,
-          }),
-        ),
+        batch.map((file) => sandbox.files.write(workspacePath(WORKSPACE, file.path), file.content)),
       );
       batch = [];
       batchBytes = 0;
     };
     for await (const file of files) {
       context.signal.throwIfAborted();
-      if (batch.length >= 8 || batchBytes + file.content.byteLength > PORTABLE_TRANSFER_BATCH_BYTES)
+      if (batch.length >= 4 || batchBytes + file.content.byteLength > PORTABLE_TRANSFER_BATCH_BYTES)
         await flush();
+      const target = workspacePath(WORKSPACE, file.path);
+      permissions.get(file.executable ? 0o700 : 0o600)?.push(target);
       batch.push(file);
       batchBytes += file.content.byteLength;
     }
     await flush();
+    for (const [mode, paths] of permissions) {
+      for (let offset = 0; offset < paths.length; offset += 64) {
+        const result = await sandbox.exec(
+          `chmod ${mode.toString(8)} -- ${paths
+            .slice(offset, offset + 64)
+            .map(shellQuote)
+            .join(" ")}`,
+          { timeoutSec: 30, signal: context.signal },
+        );
+        if (result.exitCode !== 0 || result.timedOut)
+          throw new Error("could not restore Railway workspace permissions");
+      }
+    }
   }
 
   async snapshot(computer: ComputerRef, context: AdapterContext) {
