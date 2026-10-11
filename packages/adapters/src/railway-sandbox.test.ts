@@ -30,6 +30,7 @@ const computer: ComputerRef = {
 const provider = new RailwaySandboxProvider({ token: "test", environmentId: "environment" });
 const sandbox = {
   id: "sandbox",
+  domains: [{ port: 6080, domain: "screen.example.test" }],
   status: "RUNNING",
   destroy: vi.fn(),
   heartbeat: vi.fn(),
@@ -129,6 +130,25 @@ describe("Railway computers", () => {
       expect.stringContaining("'a; touch /tmp/unwanted'"),
       expect.objectContaining({ cwd: "/home/rakazo/notes", timeoutSec: 5 }),
     );
+  });
+
+  it("protects screen sockets with a per-screen token", async () => {
+    sandbox.exec.mockResolvedValue({
+      stdout: "RAKAZO_DESKTOP=0:screen-token",
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+    });
+    const screen = await provider.connectScreen(
+      computer,
+      { view: "stream", interactive: false },
+      ctx,
+    );
+    if (!screen.url) throw new Error("missing screen URL");
+    const url = new URL(screen.url);
+    expect(url.origin).toBe("https://screen.example.test");
+    expect(url.searchParams.get("path")).toBe("websockify?token=screen-token");
+    expect(url.searchParams.has("token")).toBe(false);
   });
 
   it("rejects oversized files instead of returning truncated content", async () => {
