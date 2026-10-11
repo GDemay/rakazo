@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 beforeEach(() => {
@@ -19,7 +20,16 @@ it("reuses the sandbox environment without cloning application services", async 
     Response.json({
       data: {
         project: {
-          environments: { edges: [{ node: { id: "isolated", name: "sbx-app" } }] },
+          environments: {
+            edges: [
+              {
+                node: {
+                  id: "isolated",
+                  name: `sbx-${createHash("sha256").update("app:production").digest("hex").slice(0, 24)}`,
+                },
+              },
+            ],
+          },
         },
       },
     }),
@@ -39,7 +49,10 @@ it("creates an empty environment with a bounded name when absent", async () => {
   vi.stubGlobal("fetch", fetch);
   await import("../../../infra/railway/sandbox-environment.mjs");
   expect(JSON.parse(fetch.mock.calls[1]?.[1].body).variables).toEqual({
-    input: { name: "sbx-000000000000400080000000", projectId: "project" },
+    input: {
+      name: `sbx-${createHash("sha256").update("00000000-0000-4000-8000-000000000000:production").digest("hex").slice(0, 24)}`,
+      projectId: "project",
+    },
   });
   expect(process.stdout.write).toHaveBeenCalledWith("isolated");
 });
@@ -63,7 +76,14 @@ it("refuses the application's environment", async () => {
         data: {
           project: {
             environments: {
-              edges: [{ node: { id: "production", name: "sbx-app" } }],
+              edges: [
+                {
+                  node: {
+                    id: "production",
+                    name: `sbx-${createHash("sha256").update("app:production").digest("hex").slice(0, 24)}`,
+                  },
+                },
+              ],
             },
           },
         },
@@ -74,4 +94,27 @@ it("refuses the application's environment", async () => {
     "must be separate",
   );
   expect(process.stdout.write).not.toHaveBeenCalled();
+});
+
+it("keeps deployments of the same service in separate sandbox environments", async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json({ data: { project: { environments: { edges: [] } } } }))
+    .mockResolvedValueOnce(
+      Response.json({ data: { environmentCreate: { id: "isolated-production" } } }),
+    )
+    .mockResolvedValueOnce(Response.json({ data: { project: { environments: { edges: [] } } } }))
+    .mockResolvedValueOnce(
+      Response.json({ data: { environmentCreate: { id: "isolated-staging" } } }),
+    );
+  vi.stubGlobal("fetch", fetch);
+  await import("../../../infra/railway/sandbox-environment.mjs");
+  vi.resetModules();
+  vi.stubEnv("RAILWAY_ENVIRONMENT_ID", "staging");
+  await import("../../../infra/railway/sandbox-environment.mjs");
+  const production = JSON.parse(fetch.mock.calls[1]?.[1].body).variables.input.name;
+  const staging = JSON.parse(fetch.mock.calls[3]?.[1].body).variables.input.name;
+  expect(production).not.toBe(staging);
+  expect(production).toMatch(/^sbx-[a-f0-9]{24}$/);
+  expect(staging).toMatch(/^sbx-[a-f0-9]{24}$/);
 });

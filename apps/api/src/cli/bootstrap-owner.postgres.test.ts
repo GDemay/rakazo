@@ -38,6 +38,21 @@ it.skipIf(!testDatabase)(
         await prisma.deploymentSettings.findUnique({ where: { id: "default" } }),
       ).toMatchObject({ ownerUserId: owner.id, signupsEnabled: false });
       expect(await prisma.session.count()).toBe(0);
+      const memberships = await prisma.spaceMember.count({ where: { userId: owner.id } });
+      expect(memberships).toBeGreaterThan(0);
+      await prisma.deploymentSettings.update({
+        where: { id: "default" },
+        data: { ownerUserId: null },
+      });
+      await expect(boot("wrong-recovery-password")).rejects.toThrow();
+      expect(
+        await prisma.deploymentSettings.findUnique({ where: { id: "default" } }),
+      ).toMatchObject({ ownerUserId: null });
+      await boot(env.OWNER_PASSWORD);
+      expect(
+        await prisma.deploymentSettings.findUnique({ where: { id: "default" } }),
+      ).toMatchObject({ ownerUserId: owner.id, signupsEnabled: false });
+      expect(await prisma.spaceMember.count({ where: { userId: owner.id } })).toBe(memberships);
       await boot("a-different-password-on-restart");
       expect(await prisma.user.count()).toBe(1);
       const auth = createAuth(prisma, {

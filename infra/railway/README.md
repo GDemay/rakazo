@@ -20,7 +20,7 @@ The token must be able to create environments and sandboxes in the project. Pref
 - The owner account is created before the public web server starts. Public registration is closed on every start; this template is intended for a personal deployment.
 - Every install gets separate random database, authentication, encryption, screen and initial owner secrets. Keep the encryption key and database password stable across redeploys.
 - PostgreSQL has no public endpoint. Only the web port is published; the API binds to loopback.
-- Computers run in a separate, empty Railway environment, so they cannot reach the application's private database network. Startup creates this environment automatically and reuses it on restart.
+- Computers run in a separate, empty Railway environment, so they cannot reach the application's private database network. Startup creates one environment per application service and application environment, then reuses it on restart.
 - App processes run as the unprivileged `node` user. The entrypoint briefly uses root to set the mounted volume's owner, then drops privileges.
 - The API, worker and web share one service and `/data` volume. PostgreSQL has its own volume. The template requests daily backups for both volumes; Railway requires a Pro workspace to use managed backups. Run one application replica; do not enable service sleeping.
 - Any process failure restarts the application service. Database migrations finish before startup. Idle computers stop after ten minutes; each user can create up to three computers.
@@ -30,6 +30,8 @@ The token must be able to create environments and sandboxes in the project. Pref
 To update, connect the service to the desired source branch and deploy its latest commit in the application environment. Do not deploy application services into the sandbox environment. The owner bootstrap keeps existing accounts and passwords. Changing `OWNER_PASSWORD` later does not reset an account password.
 
 Back up PostgreSQL, `/data`, and `ENCRYPTION_KEY` before upgrades. Railway volume persistence is not a backup. Keep backups private and test restoring them together. Do not delete volumes to fix a failed deploy.
+
+For installations using the older service-only sandbox name, rename the existing sandbox environment before upgrading. The new name is `sbx-` followed by the first 24 hexadecimal characters of the SHA-256 hash of `<service-id>:<application-environment-id>`. Renaming keeps the environment ID and existing computers intact. Do not delete or duplicate the environment. If multiple application environments already share it, checkpoint their computers and move each deployment to its own sandbox environment before upgrading.
 
 The sandbox environment is separate from the app environment. Do not put trusted services or secrets there. If you delete the application project, check for and remove its remaining computers.
 

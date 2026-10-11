@@ -43,6 +43,10 @@ try {
     );
     if (!response.ok) throw new Error(`Owner bootstrap failed (${response.status})`);
     const user = await prisma.user.findUniqueOrThrow({ where: { email } });
+    await prisma.deploymentSettings.updateMany({
+      where: { id: "default", ownerUserId: null },
+      data: { ownerUserId: user.id },
+    });
     const owner = await prisma.deploymentSettings.findUnique({ where: { id: "default" } });
     if (owner?.ownerUserId !== user.id) throw new Error("Owner bootstrap did not complete");
     await prisma.session.deleteMany({ where: { userId: user.id } });

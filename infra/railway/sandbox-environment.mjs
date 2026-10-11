@@ -1,11 +1,13 @@
+import { createHash } from "node:crypto";
+
 const {
   RAILWAY_API_TOKEN: token,
   RAILWAY_PROJECT_ID: projectId,
   RAILWAY_SERVICE_ID: serviceId,
   RAILWAY_ENVIRONMENT_ID: currentEnvironmentId,
 } = process.env;
-if (!token || !projectId || !serviceId)
-  throw new Error("Railway token, project and service are required");
+if (!token || !projectId || !serviceId || !currentEnvironmentId)
+  throw new Error("Railway token, project, service and environment are required");
 
 async function query(document, variables) {
   const response = await fetch("https://backboard.railway.com/graphql/v2", {
@@ -20,7 +22,10 @@ async function query(document, variables) {
   return result.data;
 }
 
-const name = `sbx-${serviceId.replaceAll("-", "").slice(0, 24)}`;
+const name = `sbx-${createHash("sha256")
+  .update(`${serviceId}:${currentEnvironmentId}`)
+  .digest("hex")
+  .slice(0, 24)}`;
 const { project } = await query(
   "query($id: String!) { project(id: $id) { environments { edges { node { id name } } } } }",
   { id: projectId },
