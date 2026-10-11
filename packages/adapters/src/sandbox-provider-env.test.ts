@@ -27,11 +27,13 @@ describe("resolveSandboxProvider", () => {
       SANDBOX_PROVIDER: "railway",
       RAILWAY_API_TOKEN: "test",
       RAILWAY_ENVIRONMENT_ID: "environment",
+      RAILWAY_MAX_WORKSPACE_FILE_BYTES: "1024",
     };
     expect(resolveSandboxProvider(env)).toBe("railway");
     expect(sandboxProviderOptionsFromEnv(env)).toMatchObject({
       railwayApiToken: "test",
       railwayEnvironmentId: "environment",
+      railwayMaxWorkspaceFileBytes: "1024",
     });
   });
 

@@ -41,6 +41,7 @@ export function sandboxProviderOptionsFromEnv(
   | "createosRootfs"
   | "railwayApiToken"
   | "railwayEnvironmentId"
+  | "railwayMaxWorkspaceFileBytes"
   | "boxApiKey"
   | "boxApiUrl"
 > {
@@ -55,6 +56,7 @@ export function sandboxProviderOptionsFromEnv(
     createosRootfs: source.CREATEOS_SANDBOX_ROOTFS,
     railwayApiToken: source.RAILWAY_API_TOKEN,
     railwayEnvironmentId: source.RAILWAY_ENVIRONMENT_ID,
+    railwayMaxWorkspaceFileBytes: source.RAILWAY_MAX_WORKSPACE_FILE_BYTES,
     boxApiKey: source.BOX_API_KEY,
     boxApiUrl: source.BOX_API_URL ?? source.BOX_BASE_URL,
   };

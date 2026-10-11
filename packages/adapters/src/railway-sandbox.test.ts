@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ComputerRef, ProcessEvent } from "@rakazo/adapter-kit";
@@ -46,6 +46,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(Sandbox.connect).mockResolvedValue(sandbox as unknown as Sandbox);
   vi.mocked(Sandbox.create).mockResolvedValue(sandbox as unknown as Sandbox);
+  sandbox.exec.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
 });
 
 describe("Railway computers", () => {
@@ -78,7 +79,7 @@ describe("Railway computers", () => {
     const directory = await mkdtemp(path.join(tmpdir(), "rakazo-railway-contract-"));
     const localPath = (filePath: string) => filePath.replace("/home/rakazo", directory);
     sandbox.files.write.mockImplementation(
-      async (filePath: string, content: Uint8Array, options: { mode: number }) => {
+      async (filePath: string, content: Uint8Array, options?: { mode: number }) => {
         await mkdir(path.dirname(localPath(filePath)), { recursive: true });
         await writeFile(localPath(filePath), content, options);
       },
@@ -95,7 +96,11 @@ describe("Railway computers", () => {
       ),
     );
     sandbox.exec.mockImplementation(async (command: string) => {
-      if (command.includes("find . -type f -print0") || command.startsWith("'echo'")) {
+      if (
+        command.includes("find . -type f -print0") ||
+        command.startsWith("'echo'") ||
+        command.startsWith("chmod ")
+      ) {
         const result = await promisify(execFile)("bash", [
           "-c",
           command.replaceAll("/home/rakazo", directory),
@@ -291,15 +296,83 @@ describe("Railway computers", () => {
       }
       await provider.importWorkspace(computer, files(), ctx);
       expect(Sandbox.connect).toHaveBeenCalledTimes(1);
-      expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/bin/tool", content, {
-        mode: 0o700,
-      });
-      expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/note", content, {
-        mode: 0o600,
+      expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/bin/tool", content);
+      expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/note", content);
+      expect(sandbox.exec).toHaveBeenCalledWith(
+        "chmod 700 -- '/home/rakazo/bin/tool'",
+        expect.objectContaining({ signal: ctx.signal }),
+      );
+      expect(sandbox.exec).toHaveBeenCalledWith(
+        "chmod 600 -- '/home/rakazo/note'",
+        expect.objectContaining({ signal: ctx.signal }),
+      );
+    } finally {
+      stopBrowsers.mockRestore();
+    }
+  });
+
+  it("restores many files without one exec connection per file", async () => {
+    const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    let active = 0;
+    let peak = 0;
+    sandbox.files.write.mockImplementation(async () => {
+      peak = Math.max(peak, ++active);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      active--;
+    });
+    async function* files() {
+      for (let index = 0; index < 130; index++)
+        yield { path: `file-${index}`, content: Uint8Array.of(index) };
+    }
+    try {
+      await provider.importWorkspace(computer, files(), ctx);
+      expect(sandbox.files.write).toHaveBeenCalledTimes(130);
+      expect(peak).toBe(4);
+      expect(sandbox.exec).toHaveBeenCalledTimes(3);
+      expect(sandbox.files.write.mock.calls.every((call) => call[2] === undefined)).toBe(true);
+      sandbox.exec.mockResolvedValue({ exitCode: 1, stdout: "", stderr: "denied" });
+      await expect(provider.importWorkspace(computer, files(), ctx)).rejects.toThrow("permissions");
+    } finally {
+      stopBrowsers.mockRestore();
+    }
+  });
+
+  it("rejects oversized exports before reading and files that grow during a read", async () => {
+    const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    const bounded = new RailwaySandboxProvider({
+      token: "test",
+      environmentId: "environment",
+      maxWorkspaceFileBytes: "4",
+    });
+    try {
+      sandbox.exec.mockResolvedValue({ exitCode: 0, stdout: "large\u0000600\u00005\u0000" });
+      await expect(bounded.exportWorkspace(computer, ctx).next()).rejects.toThrow(
+        "exceeds 4 bytes",
+      );
+      expect(sandbox.files.read).not.toHaveBeenCalled();
+      sandbox.exec.mockResolvedValue({ exitCode: 0, stdout: "growing\u0000600\u00004\u0000" });
+      sandbox.files.read.mockResolvedValue(new Uint8Array(5));
+      await expect(bounded.exportWorkspace(computer, ctx).next()).rejects.toThrow(
+        "exceeds 4 bytes",
+      );
+      expect(sandbox.files.read).toHaveBeenCalledWith("/home/rakazo/growing", {
+        format: "bytes",
+        length: 5,
       });
     } finally {
       stopBrowsers.mockRestore();
     }
+  });
+
+  it.each(["0", "-1", "1.5", "invalid"])("rejects an invalid export limit %s", (limit) => {
+    expect(
+      () =>
+        new RailwaySandboxProvider({
+          token: "test",
+          environmentId: "environment",
+          maxWorkspaceFileBytes: limit,
+        }),
+    ).toThrow();
   });
 
   it("allows repeated destroy calls for an absent computer", async () => {
