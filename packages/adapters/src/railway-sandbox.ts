@@ -16,7 +16,10 @@ import type {
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
 import { Sandbox, SandboxNotFoundError } from "railway";
 import { normalizeWorkspacePath, shellQuote, workspacePath } from "./computer-support.js";
-import { shouldSkipPortableWorkspaceFile } from "./computer-workspace.js";
+import {
+  PORTABLE_TRANSFER_BATCH_BYTES,
+  shouldSkipPortableWorkspaceFile,
+} from "./computer-workspace.js";
 import { LinuxDesktop, PREPARE_LINUX_DESKTOP } from "./linux-desktop.js";
 import { sandboxCommandArgv } from "./sandbox-command-environment.js";
 
@@ -231,15 +234,28 @@ export class RailwaySandboxProvider implements SandboxProvider {
     if (result.exitCode !== 0 || result.timedOut)
       throw new Error("could not list Railway workspace");
     const entries = result.stdout.split("\0");
+    const sandbox = await this.connect(computer, context);
+    const files: Array<{ path: string; executable: boolean }> = [];
     for (let index = 0; index + 1 < entries.length; index += 2) {
       const filePath = entries[index];
       const mode = entries[index + 1];
       if (!filePath || !mode || shouldSkipPortableWorkspaceFile(filePath)) continue;
-      yield {
+      files.push({
         path: filePath,
-        content: await this.readFile(computer, filePath, context),
         executable: (Number.parseInt(mode, 8) & 0o111) !== 0,
-      };
+      });
+    }
+    for (let index = 0; index < files.length; index += 8) {
+      context.signal.throwIfAborted();
+      const batch = await Promise.all(
+        files.slice(index, index + 8).map(async (file) => ({
+          ...file,
+          content: await sandbox.files.read(workspacePath(WORKSPACE, file.path), {
+            format: "bytes",
+          }),
+        })),
+      );
+      for (const file of batch) yield file;
     }
   }
 
@@ -249,7 +265,29 @@ export class RailwaySandboxProvider implements SandboxProvider {
     context: AdapterContext,
   ) {
     await this.desktops.stopBrowsers(computer, context);
-    for await (const file of files) await this.writeFile(computer, file, context);
+    const sandbox = await this.connect(computer, context);
+    let batch: PortableFile[] = [];
+    let batchBytes = 0;
+    const flush = async () => {
+      context.signal.throwIfAborted();
+      await Promise.all(
+        batch.map((file) =>
+          sandbox.files.write(workspacePath(WORKSPACE, file.path), file.content, {
+            mode: file.executable ? 0o700 : 0o600,
+          }),
+        ),
+      );
+      batch = [];
+      batchBytes = 0;
+    };
+    for await (const file of files) {
+      context.signal.throwIfAborted();
+      if (batch.length >= 8 || batchBytes + file.content.byteLength > PORTABLE_TRANSFER_BATCH_BYTES)
+        await flush();
+      batch.push(file);
+      batchBytes += file.content.byteLength;
+    }
+    await flush();
   }
 
   async snapshot(computer: ComputerRef, context: AdapterContext) {

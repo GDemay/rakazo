@@ -178,6 +178,7 @@ describe("Railway computers", () => {
       await mkdir(path.join(directory, "bin"));
       const content = Uint8Array.from([0, 255, 128]);
       await writeFile(path.join(directory, "bin/tool"), content, { mode: 0o700 });
+      await writeFile(path.join(directory, "note"), "saved", { mode: 0o600 });
       await symlink("bin", path.join(directory, "linked-bin"));
       await promisify(execFile)("mkfifo", [path.join(directory, "pipe")]);
       sandbox.exec.mockImplementation(async (command: string) => {
@@ -193,10 +194,38 @@ describe("Railway computers", () => {
       );
       const exported = [];
       for await (const file of provider.exportWorkspace(computer, ctx)) exported.push(file);
-      expect(exported).toEqual([{ path: "bin/tool", content, executable: true }]);
+      expect(exported).toEqual(
+        expect.arrayContaining([
+          { path: "bin/tool", content, executable: true },
+          { path: "note", content: new TextEncoder().encode("saved"), executable: false },
+        ]),
+      );
+      expect(exported).toHaveLength(2);
+      expect(Sandbox.connect).toHaveBeenCalledTimes(2);
     } finally {
       stopBrowsers.mockRestore();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("restores binary files and permissions over one connection", async () => {
+    const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    const content = Uint8Array.from([0, 255, 128]);
+    try {
+      async function* files() {
+        yield { path: "bin/tool", content, executable: true };
+        yield { path: "note", content, executable: false };
+      }
+      await provider.importWorkspace(computer, files(), ctx);
+      expect(Sandbox.connect).toHaveBeenCalledTimes(1);
+      expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/bin/tool", content, {
+        mode: 0o700,
+      });
+      expect(sandbox.files.write).toHaveBeenCalledWith("/home/rakazo/note", content, {
+        mode: 0o600,
+      });
+    } finally {
+      stopBrowsers.mockRestore();
     }
   });
 
@@ -206,5 +235,29 @@ describe("Railway computers", () => {
     );
     await expect(provider.destroy(computer, ctx)).resolves.toBeUndefined();
     expect(await provider.isRunning(computer, ctx)).toBe(false);
+  });
+
+  it("bounds concurrent restore memory while copying every file", async () => {
+    const stopBrowsers = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    const content = new Uint8Array(3 * 1024 * 1024);
+    let activeBytes = 0;
+    let peakBytes = 0;
+    sandbox.files.write.mockImplementation(async (_path: string, bytes: Uint8Array) => {
+      activeBytes += bytes.byteLength;
+      peakBytes = Math.max(peakBytes, activeBytes);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      activeBytes -= bytes.byteLength;
+    });
+    try {
+      async function* files() {
+        for (let index = 0; index < 20; index++) yield { path: `file-${index}`, content };
+      }
+      await provider.importWorkspace(computer, files(), ctx);
+      expect(sandbox.files.write).toHaveBeenCalledTimes(20);
+      expect(peakBytes).toBeGreaterThan(content.byteLength);
+      expect(peakBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    } finally {
+      stopBrowsers.mockRestore();
+    }
   });
 });
