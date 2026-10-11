@@ -19,7 +19,7 @@ it("reuses the sandbox environment without cloning application services", async 
     Response.json({
       data: {
         project: {
-          environments: { edges: [{ node: { id: "isolated", name: "rakazo-sandboxes-app" } }] },
+          environments: { edges: [{ node: { id: "isolated", name: "sbx-app" } }] },
         },
       },
     }),
@@ -38,7 +38,7 @@ it("creates an empty environment when absent", async () => {
   vi.stubGlobal("fetch", fetch);
   await import("../../../infra/railway/sandbox-environment.mjs");
   expect(JSON.parse(fetch.mock.calls[1]?.[1].body).variables).toEqual({
-    input: { name: "rakazo-sandboxes-app", projectId: "project" },
+    input: { name: "sbx-app", projectId: "project" },
   });
   expect(process.stdout.write).toHaveBeenCalledWith("isolated");
 });
@@ -62,7 +62,7 @@ it("refuses the application's environment", async () => {
         data: {
           project: {
             environments: {
-              edges: [{ node: { id: "production", name: "rakazo-sandboxes-app" } }],
+              edges: [{ node: { id: "production", name: "sbx-app" } }],
             },
           },
         },

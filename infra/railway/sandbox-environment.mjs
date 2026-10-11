@@ -20,7 +20,7 @@ async function query(document, variables) {
   return result.data;
 }
 
-const name = `rakazo-sandboxes-${serviceId}`;
+const name = `sbx-${serviceId.replaceAll("-", "").slice(0, 24)}`;
 const { project } = await query(
   "query($id: String!) { project(id: $id) { environments { edges { node { id name } } } } }",
   { id: projectId },
