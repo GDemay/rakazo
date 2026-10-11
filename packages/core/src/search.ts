@@ -1,8 +1,23 @@
-const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+/gi;
+const URL_PATTERN = /https?:\/\/[^\s<>"'\]]+/gi;
+
+function unbalancedClose(text: string): boolean {
+  return text.split(")").length > text.split("(").length;
+}
+
+function trimLinkEnd(url: string): string {
+  let end = url.length;
+  while (end > 0) {
+    const last = url[end - 1];
+    if (last && ".,;:!?".includes(last)) end -= 1;
+    else if (last === ")" && unbalancedClose(url.slice(0, end))) end -= 1;
+    else break;
+  }
+  return url.slice(0, end);
+}
 
 export function extractLinksFromText(text: string): string[] {
   const matches = text.match(URL_PATTERN) ?? [];
-  return [...new Set(matches.map((url) => url.replace(/[.,;:!?)]+$/, "")))];
+  return [...new Set(matches.map(trimLinkEnd))];
 }
 
 export function matchesSearchQuery(
