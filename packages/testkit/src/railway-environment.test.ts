@@ -30,7 +30,8 @@ it("reuses the sandbox environment without cloning application services", async 
   expect(process.stdout.write).toHaveBeenCalledWith("isolated");
 });
 
-it("creates an empty environment when absent", async () => {
+it("creates an empty environment with a bounded name when absent", async () => {
+  vi.stubEnv("RAILWAY_SERVICE_ID", "00000000-0000-4000-8000-000000000000");
   const fetch = vi
     .fn()
     .mockResolvedValueOnce(Response.json({ data: { project: { environments: { edges: [] } } } }))
@@ -38,7 +39,7 @@ it("creates an empty environment when absent", async () => {
   vi.stubGlobal("fetch", fetch);
   await import("../../../infra/railway/sandbox-environment.mjs");
   expect(JSON.parse(fetch.mock.calls[1]?.[1].body).variables).toEqual({
-    input: { name: "sbx-app", projectId: "project" },
+    input: { name: "sbx-000000000000400080000000", projectId: "project" },
   });
   expect(process.stdout.write).toHaveBeenCalledWith("isolated");
 });
