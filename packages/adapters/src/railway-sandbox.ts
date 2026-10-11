@@ -280,6 +280,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
       batchBytes += size;
     }
     if (files.length) batches.push(files);
+    const growing: Array<{ path: string; executable: boolean }> = [];
     for (const files of batches) {
       context.signal.throwIfAborted();
       const batch = await Promise.all(
@@ -291,8 +292,10 @@ export class RailwaySandboxProvider implements SandboxProvider {
             });
             if (content.byteLength > this.maxWorkspaceFileBytes)
               throw new Error(`Railway workspace file exceeds ${this.maxWorkspaceFileBytes} bytes`);
-            if (content.byteLength > file.size)
-              throw new Error("Railway workspace file grew during export; retry the checkpoint");
+            if (content.byteLength > file.size) {
+              growing.push({ path: file.path, executable: file.executable });
+              return undefined;
+            }
             return { path: file.path, executable: file.executable, content };
           } catch (error) {
             if (error instanceof SandboxFileNotFoundError) return undefined;
@@ -301,6 +304,21 @@ export class RailwaySandboxProvider implements SandboxProvider {
         }),
       );
       for (const file of batch) if (file) yield file;
+    }
+    // Changed files no longer fit their reserved batch; read them one at a time.
+    for (const file of growing) {
+      context.signal.throwIfAborted();
+      try {
+        const content = await sandbox.files.read(workspacePath(WORKSPACE, file.path), {
+          format: "bytes",
+          length: this.maxWorkspaceFileBytes + 1,
+        });
+        if (content.byteLength > this.maxWorkspaceFileBytes)
+          throw new Error(`Railway workspace file exceeds ${this.maxWorkspaceFileBytes} bytes`);
+        yield { ...file, content };
+      } catch (error) {
+        if (!(error instanceof SandboxFileNotFoundError)) throw error;
+      }
     }
   }
 
