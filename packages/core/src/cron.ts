@@ -65,6 +65,18 @@ export function defaultCronPreset(): CronPreset {
   return { freq: "Every day", n: 3, unit: "minutes", time: "9:00 AM", cron: "" };
 }
 
+const INTERVAL_AMOUNTS = [1, 2, 3, 5, 10, 15, 30, 45];
+const INTERVAL_MAX: Record<CronUnit, number> = { minutes: 59, hours: 23, days: 31 };
+
+// Cron steps cannot exceed the field's range, so offer only amounts that fit.
+export function cronIntervalAmounts(unit: CronUnit): number[] {
+  return INTERVAL_AMOUNTS.filter((n) => n <= INTERVAL_MAX[unit]);
+}
+
+export function clampIntervalAmount(n: number, unit: CronUnit): number {
+  return cronIntervalAmounts(unit).findLast((amount) => amount <= n) ?? 1;
+}
+
 export function cronFromPreset(input: CronPresetInput): string {
   const advancedCron = input.cron?.trim();
   if (input.freq === "Advanced") {

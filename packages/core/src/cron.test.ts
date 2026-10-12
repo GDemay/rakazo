@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { CronPreset } from "./cron.js";
 import {
+  clampIntervalAmount,
   cronFromPreset,
+  cronIntervalAmounts,
   describeCronPreset,
   formatCron,
   hasMixedOneShotSchedule,
@@ -300,5 +302,20 @@ describe("nextCronDateAcrossStrict", () => {
     const from = new Date("2026-08-24T00:00:00.000Z");
     expect(nextCronDateAcrossStrict([ONCE_ROUTINE_CRON], from, "UTC")).toBeNull();
     expect(nextCronDateAcrossStrict([], from, "UTC")).toBeNull();
+  });
+});
+
+describe("cronIntervalAmounts", () => {
+  it.each(["minutes", "hours", "days"] as const)("only offers runnable %s amounts", (unit) => {
+    for (const n of cronIntervalAmounts(unit)) {
+      const cron = cronFromPreset({ freq: "Interval", n, unit });
+      expect(() => nextCronDate(cron, new Date("2026-01-01T00:00:00Z"))).not.toThrow();
+    }
+  });
+
+  it("clamps an amount that is too large for the new unit", () => {
+    expect(clampIntervalAmount(45, "hours")).toBe(15);
+    expect(clampIntervalAmount(45, "days")).toBe(30);
+    expect(clampIntervalAmount(45, "minutes")).toBe(45);
   });
 });
