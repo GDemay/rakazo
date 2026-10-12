@@ -175,7 +175,7 @@ export function RoutineSchedule({
   const { i18n, t } = useLingui();
   const { lead, detail } = describeCronPresetLocalized(value, i18n.locale);
   const times = TIMES.includes(value.time) ? TIMES : [...TIMES, value.time];
-  const numbers = cronIntervalAmounts(value.unit);
+  const numbers = cronIntervalAmounts(value.unit, value.n);
 
   function patch(partial: Partial<CronPreset>) {
     onChange({ ...value, ...partial });
