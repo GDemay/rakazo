@@ -357,6 +357,11 @@ describe("plainTextFromMarkdown comparison signs", () => {
     expect(plainTextFromMarkdown("1 <2 and 3> 4")).toBe("1 <2 and 3> 4");
   });
 
+  it("keeps unspaced comparisons that look like tags", () => {
+    expect(plainTextFromMarkdown("Check a<b+1 and c>d")).toBe("Check a<b+1 and c>d");
+    expect(plainTextFromMarkdown("x<y && z>0")).toBe("x<y && z>0");
+  });
+
   it("still strips real tags", () => {
     expect(plainTextFromMarkdown("Use <b>bold</b> now")).toBe("Use bold now");
   });
