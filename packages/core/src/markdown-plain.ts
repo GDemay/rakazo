@@ -234,11 +234,14 @@ function htmlTagClose(text: string, open: number): number {
   return quote && text.length > open + 1 ? text.length - 1 : -1;
 }
 
+// A tag opens with a name, `/name`, `!` or `?`; `< 5` and `<=` are prose.
+const HTML_TAG_START = /^(?:[A-Za-z]|\/[A-Za-z]|[!?])/;
+
 function stripHtmlTags(text: string): string {
   let out = "";
   let i = 0;
   while (i < text.length) {
-    if (text[i] === "<") {
+    if (text[i] === "<" && HTML_TAG_START.test(text.slice(i + 1, i + 3))) {
       const close = htmlTagClose(text, i);
       if (close !== -1) {
         out += " ";

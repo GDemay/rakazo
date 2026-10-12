@@ -690,12 +690,22 @@ private fun htmlTagClose(text: String, open: Int): Int {
   return if (quote != null && text.length > open + 1) text.length - 1 else -1
 }
 
-/** `<...>` spans drop to a single space. Mirrors stripHtmlTags. */
+/** A tag opens with a name, `/name`, `!` or `?`; `< 5` and `<=` are prose. */
+private fun isHtmlTagStart(text: String, at: Int): Boolean {
+  var next = at + 1
+  val first = text.getOrNull(next) ?: return false
+  if (first == '!' || first == '?') return true
+  if (first == '/') next++
+  val letter = text.getOrNull(next) ?: return false
+  return letter in 'A'..'Z' || letter in 'a'..'z'
+}
+
+/** `<...>` spans that open like a tag drop to a single space. Mirrors stripHtmlTags. */
 private fun stripHtmlTags(text: String): String {
   val out = StringBuilder()
   var i = 0
   while (i < text.length) {
-    if (text[i] == '<') {
+    if (text[i] == '<' && isHtmlTagStart(text, i)) {
       val close = htmlTagClose(text, i)
       if (close != -1) {
         out.append(' ')
