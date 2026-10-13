@@ -134,10 +134,12 @@ export class RailwaySandboxProvider implements SandboxProvider {
       sandbox = await Sandbox.create({
         ...this.options,
         fetch: async (input, init) => {
-          const response = await railwayFetch(input, { ...init, signal: context.signal });
+          // Finish the bounded request so cancellation cannot hide a created sandbox's ID.
+          const response = await railwayFetch(input, init);
           const body = await response.clone().json();
           if (typeof body.data?.sandboxCreate?.id === "string")
             createdId = body.data.sandboxCreate.id;
+          context.signal.throwIfAborted();
           return response;
         },
         networkIsolation: "ISOLATED",

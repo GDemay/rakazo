@@ -151,6 +151,42 @@ describe("Railway computers", () => {
     }
   });
 
+  it("captures and destroys a sandbox when canceled before the create response is read", async () => {
+    const controller = new AbortController();
+    const reason = new Error("provision canceled");
+    let acceptRequest!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      acceptRequest = resolve;
+    });
+    let sendResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      sendResponse = resolve;
+    });
+    const fetchMock = vi.fn((_input, _init) => {
+      acceptRequest();
+      return response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(Sandbox.create).mockImplementation(async (options) => {
+      await options?.fetch?.("https://backboard.railway.com/graphql/v2");
+      return sandbox as unknown as Sandbox;
+    });
+
+    const pending = provider.provision(
+      { botId: "bot", homePath: "/unused" },
+      { ...ctx, signal: controller.signal },
+    );
+    const assertion = expect(pending).rejects.toBe(reason);
+    await accepted;
+    controller.abort(reason);
+    sendResponse(new Response('{"data":{"sandboxCreate":{"id":"created"}}}'));
+    await assertion;
+
+    expect(fetchMock.mock.calls[0]?.[1]?.signal.aborted).toBe(false);
+    expect(Sandbox.connect).toHaveBeenCalledWith("created", expect.anything());
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+  });
+
   it("destroys computers during canceled preparation rollback", async () => {
     const controller = new AbortController();
     controller.abort();
