@@ -61,11 +61,13 @@ export class RailwaySandboxProvider implements SandboxProvider {
       const sandbox = await this.connect(computer, context);
       const domain = sandbox.domains.find((entry) => entry.port === port);
       if (!domain) throw new Error("Railway computer has no screen domain");
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.up\.railway\.app$/i.test(domain.domain))
+        throw new Error("Invalid Railway screen domain");
       return `https://${domain.domain}/vnc.html`;
     },
   });
 
-  private readonly options: RailwaySandboxOptions & RailwayClientConfig;
+  private readonly options: RailwayClientConfig;
 
   private readonly maxWorkspaceFileBytes: number;
 
@@ -124,6 +126,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
           return this.ref(sandbox.id, request.botId, false);
         }
         if (sandbox.status === "CREATING") throw new Error("Railway computer is still starting");
+        await this.destroy(this.ref(sandbox.id, request.botId, false), context);
       } catch (error) {
         if (!(error instanceof SandboxNotFoundError)) throw error;
       }
@@ -135,16 +138,17 @@ export class RailwaySandboxProvider implements SandboxProvider {
         ...this.options,
         fetch: async (input, init) => {
           // Finish the bounded request so cancellation cannot hide a created sandbox's ID.
-          const response = await railwayFetch(input, init);
-          const body = await response.clone().json();
-          if (typeof body.data?.sandboxCreate?.id === "string")
-            createdId = body.data.sandboxCreate.id;
+          const response = await railwayFetch(input, init, (id) => {
+            createdId = id;
+          });
           context.signal.throwIfAborted();
           return response;
         },
         networkIsolation: "ISOLATED",
         domains: [{ port: SCREEN_PORT }],
       });
+      createdId = sandbox.id;
+      assertIsolated(sandbox);
     } catch (error) {
       if (
         error instanceof SandboxFailedError ||
@@ -429,6 +433,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
 
   async keepAlive(computer: ComputerRef) {
     const sandbox = await Sandbox.connect(computer.providerRef, this.options);
+    assertIsolated(sandbox);
     await sandbox.heartbeat();
   }
 
@@ -457,8 +462,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
           signal: init?.signal ? AbortSignal.any([init.signal, context.signal]) : context.signal,
         }),
     });
-    if (sandbox.networkIsolation === "PRIVATE")
-      throw new Error("Railway computer requires isolated networking; recreate it before use");
+    assertIsolated(sandbox);
     return sandbox;
   }
 
@@ -493,6 +497,11 @@ export class RailwaySandboxProvider implements SandboxProvider {
   }
 }
 
+function assertIsolated(sandbox: Sandbox) {
+  if (sandbox.networkIsolation !== "ISOLATED")
+    throw new Error("Railway computer requires isolated networking; recreate it before use");
+}
+
 class RailwayWebSocket extends WebSocket {
   constructor(url: string, protocols?: string | string[]) {
     super(url, protocols, { maxPayload: MAX_RESPONSE_BYTES, handshakeTimeout: 30_000 });
@@ -502,19 +511,24 @@ class RailwayWebSocket extends WebSocket {
 async function railwayFetch(
   input: Parameters<typeof fetch>[0],
   init?: RequestInit,
+  onCreated?: (id: string) => void,
 ): Promise<Response> {
   if (String(input) !== RAILWAY_API) throw new Error("Invalid Railway API endpoint");
   const deadline = AbortSignal.timeout(30_000);
   const signal = init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline;
   const response = await fetch(input, { ...init, signal, redirect: "error" });
   const bytes = await readBodyCapped(response, MAX_RESPONSE_BYTES, signal);
-  let body: { data?: unknown; errors?: unknown[] };
+  let body: { data?: { sandboxCreate?: { id?: unknown } }; errors?: unknown[] };
   try {
     body = JSON.parse(new TextDecoder().decode(bytes));
     if (!body || typeof body !== "object") throw new Error();
   } catch {
     throw new Error("Invalid Railway API response");
   }
+  // GraphQL can return a created resource alongside errors. Preserve its ID before
+  // sanitizing the response so a failed create can still clean it up.
+  const createdId = body.data?.sandboxCreate?.id;
+  if (typeof createdId === "string") onCreated?.(createdId);
   // Never attach upstream error bodies (which may echo credentials) to SDK errors.
   const failed = !response.ok || body.errors?.length || !body.data;
   return new Response(
