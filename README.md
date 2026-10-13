@@ -172,8 +172,8 @@ and `desktop:1`.
 To use Railway computers, set `SANDBOX_PROVIDER=railway`, `RAILWAY_API_TOKEN`
 (a workspace or account API token), and `RAILWAY_ENVIRONMENT_ID` on the API and
 worker. Railway supplies the environment ID automatically for hosted services.
-Computers run in the selected Railway environment and share its private network.
-Use a separate environment if computers must not reach other private services.
+Computers use isolated networking with public internet access and cannot join the
+Railway environment’s private network.
 The desktop is installed on first start. Stopping a computer saves its portable
 home and destroys the sandbox; the next start restores that home in a new sandbox.
 Railway sandbox usage is metered.
