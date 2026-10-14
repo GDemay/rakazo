@@ -144,11 +144,12 @@ export class RailwaySandboxProvider implements SandboxProvider {
           context.signal.throwIfAborted();
           return response;
         },
-        networkIsolation: "ISOLATED",
+        // Railway public domains require the sandbox to join the private network.
+        networkIsolation: "PRIVATE",
         domains: [{ port: SCREEN_PORT }],
       });
       createdId = sandbox.id;
-      assertIsolated(sandbox);
+      assertPrivateNetwork(sandbox);
     } catch (error) {
       if (
         error instanceof SandboxFailedError ||
@@ -433,7 +434,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
 
   async keepAlive(computer: ComputerRef) {
     const sandbox = await Sandbox.connect(computer.providerRef, this.options);
-    assertIsolated(sandbox);
+    assertPrivateNetwork(sandbox);
     await sandbox.heartbeat();
   }
 
@@ -462,7 +463,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
           signal: init?.signal ? AbortSignal.any([init.signal, context.signal]) : context.signal,
         }),
     });
-    assertIsolated(sandbox);
+    assertPrivateNetwork(sandbox);
     return sandbox;
   }
 
@@ -497,9 +498,11 @@ export class RailwaySandboxProvider implements SandboxProvider {
   }
 }
 
-function assertIsolated(sandbox: Sandbox) {
-  if (sandbox.networkIsolation !== "ISOLATED")
-    throw new Error("Railway computer requires isolated networking; recreate it before use");
+function assertPrivateNetwork(sandbox: Sandbox) {
+  if (sandbox.networkIsolation !== "PRIVATE")
+    throw new Error(
+      "Railway live screen requires PRIVATE networking; recreate the computer before use",
+    );
 }
 
 class RailwayWebSocket extends WebSocket {

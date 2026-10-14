@@ -51,7 +51,7 @@ const sandbox = {
   id: "sandbox",
   domains: [{ port: 6080, domain: "screen-test.up.railway.app" }],
   status: "RUNNING",
-  networkIsolation: "ISOLATED",
+  networkIsolation: "PRIVATE",
   destroy: vi.fn(),
   heartbeat: vi.fn(),
   exec: vi.fn(),
@@ -77,15 +77,16 @@ describe("Railway computers", () => {
         endpoint: "https://backboard.railway.com/graphql/v2",
         tcpProxyWsEndpoint: "wss://ssh.railway.com:2226/ws/exec",
         verbose: false,
-        networkIsolation: "ISOLATED",
+        networkIsolation: "PRIVATE",
+        domains: [{ port: 6080 }],
       }),
     );
     expect(vi.mocked(Sandbox.create).mock.calls[0]?.[0]).not.toHaveProperty("env");
     expect(JSON.stringify(ref)).not.toContain('"token"');
   });
 
-  it.each(["PRIVATE", undefined, "unexpected"])(
-    "rejects unverified isolation %s",
+  it.each(["ISOLATED", undefined, "unexpected"])(
+    "rejects networking that cannot serve the live screen: %s",
     async (networkIsolation) => {
       vi.mocked(Sandbox.connect).mockResolvedValue({
         ...sandbox,
@@ -96,30 +97,35 @@ describe("Railway computers", () => {
           { botId: "bot", homePath: "/unused", providerRef: "sandbox", providerKind: "railway" },
           ctx,
         ),
-      ).rejects.toThrow("isolated networking");
+      ).rejects.toThrow("PRIVATE networking");
       expect(Sandbox.create).not.toHaveBeenCalled();
       expect(sandbox.destroy).not.toHaveBeenCalled();
     },
   );
 
-  it("destroys a new sandbox if Railway does not confirm isolated networking", async () => {
+  it("destroys a new sandbox if Railway does not confirm PRIVATE networking", async () => {
     vi.mocked(Sandbox.create).mockResolvedValue({
       ...sandbox,
-      networkIsolation: "PRIVATE",
+      networkIsolation: "ISOLATED",
     } as unknown as Sandbox);
     await expect(provider.provision({ botId: "bot", homePath: "/unused" }, ctx)).rejects.toThrow(
-      "isolated networking",
+      "PRIVATE networking",
     );
     expect(sandbox.destroy).toHaveBeenCalledOnce();
   });
 
-  it("does not renew a sandbox with unverified isolation", async () => {
+  it("does not renew a sandbox with unverified PRIVATE networking", async () => {
     vi.mocked(Sandbox.connect).mockResolvedValue({
       ...sandbox,
       networkIsolation: undefined,
     } as unknown as Sandbox);
-    await expect(provider.keepAlive(computer)).rejects.toThrow("isolated networking");
+    await expect(provider.keepAlive(computer)).rejects.toThrow("PRIVATE networking");
     expect(sandbox.heartbeat).not.toHaveBeenCalled();
+  });
+
+  it("renews a PRIVATE sandbox used by the live screen", async () => {
+    await provider.keepAlive(computer);
+    expect(sandbox.heartbeat).toHaveBeenCalledOnce();
   });
 
   it("cleans up a sandbox whose readiness wait times out", async () => {
