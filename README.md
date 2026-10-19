@@ -178,13 +178,22 @@ Optional `CREATEOS_SANDBOX_BASE_URL`, `CREATEOS_SANDBOX_SHAPE`, and
 and `desktop:1`.
 
 To use Railway computers, set `SANDBOX_PROVIDER=railway`, `RAILWAY_API_TOKEN`
-(a workspace or account API token), and `RAILWAY_ENVIRONMENT_ID` on the API and
-worker. Railway supplies the environment ID automatically for hosted services.
-Computers run in the selected Railway environment and share its private network.
-Use a separate environment if computers must not reach other private services.
+and `RAILWAY_ENVIRONMENT_ID` on the API and worker. Choose the sandbox environment
+explicitly; Railway's automatic environment ID identifies the hosted app's environment.
+Use the narrowest Railway API token that works: prefer a project token if sufficient
+for sandbox operations and supported by the client's authentication. This provider
+currently uses bearer authentication, so use a team/workspace token rather than a
+personal account token.
+The live screen and desktop require `PRIVATE` networking so Railway's public domain
+can serve the screen. Computers use this mode and can reach other services in the
+same Railway project/environment, as well as the public internet. We recommend a
+dedicated Railway project (or at least a separate environment) for sandboxes,
+separate from the app and database. Recreate existing `ISOLATED` computers before use.
 The desktop is installed on first start. Stopping a computer saves its portable
 home and destroys the sandbox; the next start restores that home in a new sandbox.
 Railway sandbox usage is metered.
+New computers start in Railway's default region. Set `RAILWAY_SANDBOX_REGION` (for example
+`asia-southeast1-eqsg3a`) to keep them near the API; a running computer moves on its next start.
 Workspace exports reject files above 64 MiB without truncating them. Set `RAILWAY_MAX_WORKSPACE_FILE_BYTES` to change this limit.
 
 ## Desktop and mobile

@@ -14,7 +14,14 @@ import type {
   TerminalRequest,
 } from "@rakazo/adapter-kit";
 import { boundedSandboxCommandTimeoutMs } from "@rakazo/core";
-import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway";
+import type { RailwayClientConfig } from "railway";
+import {
+  Sandbox,
+  SandboxFailedError,
+  SandboxFileNotFoundError,
+  SandboxNotFoundError,
+  SandboxTimeoutError,
+} from "railway";
 import WebSocket from "ws";
 import { z } from "zod";
 import { normalizeWorkspacePath, shellQuote, workspacePath } from "./computer-support.js";
@@ -24,17 +31,25 @@ import {
 } from "./computer-workspace.js";
 import { LinuxDesktop, PREPARE_LINUX_DESKTOP } from "./linux-desktop.js";
 import { sandboxCommandArgv } from "./sandbox-command-environment.js";
+import { readBodyCapped } from "./web-ssrf.js";
 
 const WORKSPACE = "/home/rakazo";
 const SCREEN_PORT = 6080;
+const RAILWAY_API = "https://backboard.railway.com/graphql/v2";
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
 export interface RailwaySandboxOptions {
   token: string;
   environmentId: string;
   maxWorkspaceFileBytes?: string;
+  region?: string;
 }
 
 export class RailwaySandboxProvider implements SandboxProvider {
+  billsWhileRunning(): boolean {
+    return true;
+  }
+
   private readonly desktops = new LinuxDesktop({
     environment: async () => ({
       homeDir: WORKSPACE,
@@ -51,15 +66,19 @@ export class RailwaySandboxProvider implements SandboxProvider {
       const sandbox = await this.connect(computer, context);
       const domain = sandbox.domains.find((entry) => entry.port === port);
       if (!domain) throw new Error("Railway computer has no screen domain");
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.up\.railway\.app$/i.test(domain.domain))
+        throw new Error("Invalid Railway screen domain");
       return `https://${domain.domain}/vnc.html`;
     },
   });
 
-  private readonly options: RailwaySandboxOptions & { webSocketImpl: typeof WebSocket };
+  private readonly options: RailwayClientConfig;
 
   private readonly maxWorkspaceFileBytes: number;
 
-  constructor({ maxWorkspaceFileBytes, ...options }: RailwaySandboxOptions) {
+  private readonly region: string | undefined;
+
+  constructor({ maxWorkspaceFileBytes, region, ...options }: RailwaySandboxOptions) {
     this.maxWorkspaceFileBytes = z.coerce
       .number()
       .int()
@@ -67,8 +86,16 @@ export class RailwaySandboxProvider implements SandboxProvider {
       .max(Number.MAX_SAFE_INTEGER - 1)
       .default(64 * 1024 * 1024)
       .parse(maxWorkspaceFileBytes);
+    this.region = region;
     // Node's native WebSocket can recurse when the SDK closes a failed handshake.
-    this.options = { ...options, webSocketImpl: WebSocket };
+    this.options = {
+      ...options,
+      endpoint: RAILWAY_API,
+      tcpProxyWsEndpoint: "wss://ssh.railway.com:2226/ws/exec",
+      verbose: false,
+      fetch: railwayFetch,
+      webSocketImpl: RailwayWebSocket,
+    };
   }
 
   describe() {
@@ -99,22 +126,51 @@ export class RailwaySandboxProvider implements SandboxProvider {
     context.signal.throwIfAborted();
     if (request.providerRef && request.providerKind === "railway") {
       try {
-        const sandbox = await Sandbox.connect(request.providerRef, this.options);
+        const sandbox = await this.connect(
+          this.ref(request.providerRef, request.botId, false),
+          context,
+        );
         if (sandbox.status === "RUNNING") {
           return this.ref(sandbox.id, request.botId, false);
         }
         if (sandbox.status === "CREATING") throw new Error("Railway computer is still starting");
+        await this.destroy(this.ref(sandbox.id, request.botId, false), context);
       } catch (error) {
         if (!(error instanceof SandboxNotFoundError)) throw error;
       }
     }
-    const sandbox = await Sandbox.create({
-      ...this.options,
-      networkIsolation: "PRIVATE",
-      domains: [{ port: SCREEN_PORT }],
-    });
+    let sandbox: Sandbox;
+    let createdId: string | undefined;
+    try {
+      sandbox = await Sandbox.create({
+        ...this.options,
+        fetch: async (input, init) => {
+          // Finish the bounded request so cancellation cannot hide a created sandbox's ID.
+          const response = await railwayFetch(input, init, (id) => {
+            createdId = id;
+          });
+          context.signal.throwIfAborted();
+          return response;
+        },
+        // Railway public domains require the sandbox to join the private network.
+        networkIsolation: "PRIVATE",
+        domains: [{ port: SCREEN_PORT }],
+        ...(this.region && { region: this.region }),
+      });
+      createdId = sandbox.id;
+      assertPrivateNetwork(sandbox);
+    } catch (error) {
+      if (
+        error instanceof SandboxFailedError ||
+        (error instanceof SandboxTimeoutError && error.resource === "sandbox")
+      ) {
+        createdId = error.id;
+      }
+      if (createdId) await this.destroy(this.ref(createdId, request.botId, true), context);
+      throw error;
+    }
     if (context.signal.aborted) {
-      await sandbox.destroy();
+      await this.destroy(this.ref(sandbox.id, request.botId, true), context);
       context.signal.throwIfAborted();
     }
     return this.ref(sandbox.id, request.botId, true);
@@ -144,8 +200,11 @@ export class RailwaySandboxProvider implements SandboxProvider {
         cwd: railwayCwd(request.cwd),
         env: request.env,
         timeoutSec: boundedSandboxCommandTimeoutMs(request.timeoutMs) / 1_000,
+        maxOutputBytes: MAX_RESPONSE_BYTES,
         signal: context.signal,
       });
+      if (result.truncated)
+        throw new Error(`Railway command output exceeds ${MAX_RESPONSE_BYTES} bytes`);
       if (result.stdout) yield { type: "stdout", data: result.stdout };
       if (result.stderr) yield { type: "stderr", data: result.stderr };
       yield { type: "exit", code: result.timedOut ? 124 : (result.exitCode ?? 1) };
@@ -219,10 +278,11 @@ export class RailwaySandboxProvider implements SandboxProvider {
     const sandbox = await this.connect(computer, context);
     const content = await sandbox.files.read(workspacePath(WORKSPACE, filePath), {
       format: "bytes",
-      ...(options?.maxBytes === undefined ? {} : { length: options.maxBytes + 1 }),
+      length: (options?.maxBytes ?? this.maxWorkspaceFileBytes) + 1,
     });
-    if (options?.maxBytes !== undefined && content.byteLength > options.maxBytes) {
-      throw new Error(`computer file exceeds ${options.maxBytes} bytes`);
+    const maxBytes = options?.maxBytes ?? this.maxWorkspaceFileBytes;
+    if (content.byteLength > maxBytes) {
+      throw new Error(`computer file exceeds ${maxBytes} bytes`);
     }
     return content;
   }
@@ -248,7 +308,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
       ].join("\n"),
       context,
     );
-    if (result.exitCode !== 0 || result.timedOut)
+    if (result.exitCode !== 0 || result.timedOut || result.truncated)
       throw new Error("could not list Railway workspace");
     const entries = result.stdout.split("\0");
     const sandbox = await this.connect(computer, context);
@@ -383,6 +443,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
 
   async keepAlive(computer: ComputerRef) {
     const sandbox = await Sandbox.connect(computer.providerRef, this.options);
+    assertPrivateNetwork(sandbox);
     await sandbox.heartbeat();
   }
 
@@ -391,9 +452,10 @@ export class RailwaySandboxProvider implements SandboxProvider {
     await this.destroy(computer, context);
   }
 
-  async destroy(computer: ComputerRef, context: AdapterContext) {
+  async destroy(computer: ComputerRef, _context: AdapterContext) {
     try {
-      const sandbox = await this.connect(computer, context);
+      // Cleanup must still run when provisioning or preparation was canceled.
+      const sandbox = await Sandbox.connect(computer.providerRef, this.options);
       await sandbox.destroy();
     } catch (error) {
       if (!(error instanceof SandboxNotFoundError)) throw error;
@@ -402,7 +464,16 @@ export class RailwaySandboxProvider implements SandboxProvider {
 
   private async connect(computer: ComputerRef, context: AdapterContext) {
     context.signal.throwIfAborted();
-    return Sandbox.connect(computer.providerRef, this.options);
+    const sandbox = await Sandbox.connect(computer.providerRef, {
+      ...this.options,
+      fetch: (input, init) =>
+        railwayFetch(input, {
+          ...init,
+          signal: init?.signal ? AbortSignal.any([init.signal, context.signal]) : context.signal,
+        }),
+    });
+    assertPrivateNetwork(sandbox);
+    return sandbox;
   }
 
   private async run(
@@ -414,6 +485,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
     const sandbox = await this.connect(computer, context);
     return sandbox.exec(`bash -c ${shellQuote(command)}`, {
       timeoutSec: timeoutMs / 1_000,
+      maxOutputBytes: MAX_RESPONSE_BYTES,
       signal: context.signal,
     });
   }
@@ -425,7 +497,7 @@ export class RailwaySandboxProvider implements SandboxProvider {
     timeoutMs: number,
   ) {
     const result = await this.run(computer, command, context, timeoutMs);
-    if (result.exitCode !== 0 || result.timedOut) {
+    if (result.exitCode !== 0 || result.timedOut || result.truncated) {
       throw new Error(result.stderr || "could not prepare Railway computer");
     }
   }
@@ -433,6 +505,51 @@ export class RailwaySandboxProvider implements SandboxProvider {
   private ref(id: string, botId: string, fresh: boolean): ComputerRef {
     return { id, botId, kind: "railway", providerRef: id, fresh };
   }
+}
+
+function assertPrivateNetwork(sandbox: Sandbox) {
+  if (sandbox.networkIsolation !== "PRIVATE")
+    throw new Error(
+      "Railway live screen requires PRIVATE networking; recreate the computer before use",
+    );
+}
+
+class RailwayWebSocket extends WebSocket {
+  constructor(url: string, protocols?: string | string[]) {
+    super(url, protocols, { maxPayload: MAX_RESPONSE_BYTES, handshakeTimeout: 30_000 });
+  }
+}
+
+async function railwayFetch(
+  input: Parameters<typeof fetch>[0],
+  init?: RequestInit,
+  onCreated?: (id: string) => void,
+): Promise<Response> {
+  if (String(input) !== RAILWAY_API) throw new Error("Invalid Railway API endpoint");
+  const deadline = AbortSignal.timeout(30_000);
+  const signal = init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline;
+  const response = await fetch(input, { ...init, signal, redirect: "error" });
+  const bytes = await readBodyCapped(response, MAX_RESPONSE_BYTES, signal);
+  let body: { data?: { sandboxCreate?: { id?: unknown } }; errors?: unknown[] };
+  try {
+    body = JSON.parse(new TextDecoder().decode(bytes));
+    if (!body || typeof body !== "object") throw new Error();
+  } catch {
+    throw new Error("Invalid Railway API response");
+  }
+  // GraphQL can return a created resource alongside errors. Preserve its ID before
+  // sanitizing the response so a failed create can still clean it up.
+  const createdId = body.data?.sandboxCreate?.id;
+  if (typeof createdId === "string") onCreated?.(createdId);
+  // Never attach upstream error bodies (which may echo credentials) to SDK errors.
+  const failed = !response.ok || body.errors?.length || !body.data;
+  return new Response(
+    failed ? '{"errors":[{"message":"Railway API request failed"}]}' : new Uint8Array(bytes),
+    {
+      status: response.status,
+      headers: { "content-type": "application/json" },
+    },
+  );
 }
 
 function railwayCwd(cwd: string | undefined) {

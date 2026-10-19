@@ -5,8 +5,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ComputerRef, ProcessEvent } from "@rakazo/adapter-kit";
-import { Sandbox, SandboxFileNotFoundError, SandboxNotFoundError } from "railway";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  Sandbox,
+  SandboxFileNotFoundError,
+  SandboxNotFoundError,
+  SandboxTimeoutError,
+} from "railway";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { LinuxDesktop } from "./linux-desktop.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
@@ -16,6 +21,16 @@ vi.mock("railway", () => ({
   Sandbox: { create: vi.fn(), connect: vi.fn() },
   SandboxNotFoundError: class extends Error {},
   SandboxFileNotFoundError: class extends Error {},
+  SandboxFailedError: class extends Error {},
+  SandboxTimeoutError: class extends Error {
+    id: string;
+    resource: string;
+    constructor(options: { id: string; resource: string }) {
+      super("readiness timeout");
+      this.id = options.id;
+      this.resource = options.resource;
+    }
+  },
 }));
 
 const ctx = {
@@ -34,13 +49,18 @@ const computer: ComputerRef = {
 const provider = new RailwaySandboxProvider({ token: "test", environmentId: "environment" });
 const sandbox = {
   id: "sandbox",
-  domains: [{ port: 6080, domain: "screen.example.test" }],
+  domains: [{ port: 6080, domain: "screen-test.up.railway.app" }],
   status: "RUNNING",
+  networkIsolation: "PRIVATE",
   destroy: vi.fn(),
   heartbeat: vi.fn(),
   exec: vi.fn(),
   files: { read: vi.fn(), write: vi.fn(), list: vi.fn() },
 };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -50,6 +70,247 @@ beforeEach(() => {
 });
 
 describe("Railway computers", () => {
+  it("pins endpoints, disables SDK logging, and keeps the token outside sandbox env", async () => {
+    const ref = await provider.provision({ botId: "bot", homePath: "/unused" }, ctx);
+    expect(Sandbox.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        endpoint: "https://backboard.railway.com/graphql/v2",
+        tcpProxyWsEndpoint: "wss://ssh.railway.com:2226/ws/exec",
+        verbose: false,
+        networkIsolation: "PRIVATE",
+        domains: [{ port: 6080 }],
+      }),
+    );
+    expect(vi.mocked(Sandbox.create).mock.calls[0]?.[0]).not.toHaveProperty("env");
+    expect(vi.mocked(Sandbox.create).mock.calls[0]?.[0]).not.toHaveProperty("region");
+    expect(JSON.stringify(ref)).not.toContain('"token"');
+  });
+
+  it("creates computers in the configured region and reconnects without one", async () => {
+    const regional = new RailwaySandboxProvider({
+      token: "test",
+      environmentId: "environment",
+      region: "asia-southeast1-eqsg3a",
+    });
+    await regional.provision({ botId: "bot", homePath: "/unused" }, ctx);
+    expect(Sandbox.create).toHaveBeenCalledWith(
+      expect.objectContaining({ region: "asia-southeast1-eqsg3a" }),
+    );
+    await regional.keepAlive(computer);
+    expect(vi.mocked(Sandbox.connect).mock.calls.at(-1)?.[1]).not.toHaveProperty("region");
+  });
+
+  it.each(["ISOLATED", undefined, "unexpected"])(
+    "rejects networking that cannot serve the live screen: %s",
+    async (networkIsolation) => {
+      vi.mocked(Sandbox.connect).mockResolvedValue({
+        ...sandbox,
+        networkIsolation,
+      } as unknown as Sandbox);
+      await expect(
+        provider.provision(
+          { botId: "bot", homePath: "/unused", providerRef: "sandbox", providerKind: "railway" },
+          ctx,
+        ),
+      ).rejects.toThrow("PRIVATE networking");
+      expect(Sandbox.create).not.toHaveBeenCalled();
+      expect(sandbox.destroy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("destroys a new sandbox if Railway does not confirm PRIVATE networking", async () => {
+    vi.mocked(Sandbox.create).mockResolvedValue({
+      ...sandbox,
+      networkIsolation: "ISOLATED",
+    } as unknown as Sandbox);
+    await expect(provider.provision({ botId: "bot", homePath: "/unused" }, ctx)).rejects.toThrow(
+      "PRIVATE networking",
+    );
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("does not renew a sandbox with unverified PRIVATE networking", async () => {
+    vi.mocked(Sandbox.connect).mockResolvedValue({
+      ...sandbox,
+      networkIsolation: undefined,
+    } as unknown as Sandbox);
+    await expect(provider.keepAlive(computer)).rejects.toThrow("PRIVATE networking");
+    expect(sandbox.heartbeat).not.toHaveBeenCalled();
+  });
+
+  it("renews a PRIVATE sandbox used by the live screen", async () => {
+    await provider.keepAlive(computer);
+    expect(sandbox.heartbeat).toHaveBeenCalledOnce();
+  });
+
+  it("cleans up a sandbox whose readiness wait times out", async () => {
+    vi.mocked(Sandbox.create).mockRejectedValue(
+      new SandboxTimeoutError({
+        resource: "sandbox",
+        id: "created",
+        lastStatus: "CREATING",
+        timeoutMs: 300_000,
+      }),
+    );
+    await expect(provider.provision({ botId: "bot", homePath: "/unused" }, ctx)).rejects.toThrow(
+      "readiness timeout",
+    );
+    expect(Sandbox.connect).toHaveBeenCalledWith("created", expect.anything());
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("cleans up a known sandbox when polling fails after creation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response('{"data":{"sandboxCreate":{"id":"created"}}}')),
+    );
+    vi.mocked(Sandbox.create).mockImplementation(async (options) => {
+      await options?.fetch?.("https://backboard.railway.com/graphql/v2");
+      throw new Error("poll failed");
+    });
+    await expect(provider.provision({ botId: "bot", homePath: "/unused" }, ctx)).rejects.toThrow(
+      "poll failed",
+    );
+    expect(Sandbox.connect).toHaveBeenCalledWith("created", expect.anything());
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("cleans up a partial GraphQL create response without exposing its errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            data: { sandboxCreate: { id: "created" } },
+            errors: [{ message: "fake-secret" }],
+          }),
+        ),
+      ),
+    );
+    vi.mocked(Sandbox.create).mockImplementation(async (options) => {
+      const response = await options?.fetch?.("https://backboard.railway.com/graphql/v2");
+      throw new Error(await response?.text());
+    });
+    await expect(provider.provision({ botId: "bot", homePath: "/unused" }, ctx)).rejects.toThrow(
+      "Railway API request failed",
+    );
+    expect(Sandbox.connect).toHaveBeenCalledWith("created", expect.anything());
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("aborts a stalled API body at the request deadline", async () => {
+    await provider.provision({ botId: "bot", homePath: "/unused" }, ctx);
+    const transport = vi.mocked(Sandbox.create).mock.calls[0]?.[0]?.fetch;
+    if (!transport) throw new Error("Missing transport");
+    const controller = new AbortController();
+    const deadline = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const cancel = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream({ cancel }))));
+    try {
+      const pending = transport("https://backboard.railway.com/graphql/v2");
+      const assertion = expect(pending).rejects.toThrow("deadline");
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      controller.abort(new Error("deadline"));
+      await assertion;
+      expect(deadline).toHaveBeenCalledWith(30_000);
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      deadline.mockRestore();
+    }
+  });
+
+  it("captures and destroys a sandbox when canceled before the create response is read", async () => {
+    const controller = new AbortController();
+    const reason = new Error("provision canceled");
+    let acceptRequest!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      acceptRequest = resolve;
+    });
+    let sendResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      sendResponse = resolve;
+    });
+    const fetchMock = vi.fn((_input, _init) => {
+      acceptRequest();
+      return response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(Sandbox.create).mockImplementation(async (options) => {
+      await options?.fetch?.("https://backboard.railway.com/graphql/v2");
+      return sandbox as unknown as Sandbox;
+    });
+
+    const pending = provider.provision(
+      { botId: "bot", homePath: "/unused" },
+      { ...ctx, signal: controller.signal },
+    );
+    const assertion = expect(pending).rejects.toBe(reason);
+    await accepted;
+    controller.abort(reason);
+    sendResponse(new Response('{"data":{"sandboxCreate":{"id":"created"}}}'));
+    await assertion;
+
+    expect(fetchMock.mock.calls[0]?.[1]?.signal.aborted).toBe(false);
+    expect(Sandbox.connect).toHaveBeenCalledWith("created", expect.anything());
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("destroys computers during canceled preparation rollback", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await provider.destroy(computer, { ...ctx, signal: controller.signal });
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("bounds API reads, refuses other hosts and redirects, and sanitizes errors", async () => {
+    await provider.provision({ botId: "bot", homePath: "/unused" }, ctx);
+    const transport = vi.mocked(Sandbox.create).mock.calls[0]?.[0]?.fetch;
+    if (!transport) throw new Error("Missing transport");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response('{"errors":[{"message":"fake-secret"}]}'));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(transport("https://other.example.test/graphql")).rejects.toThrow(
+      "Invalid Railway API endpoint",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    const response = await transport("https://backboard.railway.com/graphql/v2");
+    expect(await response.text()).not.toContain("fake-secret");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ redirect: "error", signal: expect.any(AbortSignal) }),
+    );
+    fetchMock.mockResolvedValue(new Response(new Uint8Array(16 * 1024 * 1024 + 1)));
+    await expect(transport("https://backboard.railway.com/graphql/v2")).rejects.toThrow(
+      "Response is too large",
+    );
+    fetchMock.mockResolvedValue(new Response('{"unexpected":"fake-secret"}'));
+    expect(
+      await (await transport("https://backboard.railway.com/graphql/v2")).text(),
+    ).not.toContain("fake-secret");
+    fetchMock.mockResolvedValue(new Response("fake-secret", { status: 502 }));
+    await expect(transport("https://backboard.railway.com/graphql/v2")).rejects.toThrow(
+      "Invalid Railway API response",
+    );
+  });
+
+  it("fails a checkpoint when its manifest was truncated", async () => {
+    const stop = vi.spyOn(LinuxDesktop.prototype, "stopBrowsers").mockResolvedValue();
+    sandbox.exec.mockResolvedValue({ exitCode: 0, stdout: "", truncated: true });
+    try {
+      await expect(provider.exportWorkspace(computer, ctx).next()).rejects.toThrow(
+        "could not list Railway workspace",
+      );
+      expect(sandbox.files.read).not.toHaveBeenCalled();
+      expect(sandbox.exec).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ maxOutputBytes: 16 * 1024 * 1024 }),
+      );
+    } finally {
+      stop.mockRestore();
+    }
+  });
+
   it("closes a rejected SDK WebSocket handshake without re-entering its error handler", async () => {
     await provider.provision({ botId: "bot", homePath: "/unused" }, ctx);
     const Socket = vi.mocked(Sandbox.create).mock.calls[0]?.[0]?.webSocketImpl;
@@ -157,6 +418,10 @@ describe("Railway computers", () => {
       ),
     ).toMatchObject({ fresh: true });
     expect(Sandbox.create).toHaveBeenCalledOnce();
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+    expect(sandbox.destroy.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(Sandbox.create).mock.invocationCallOrder[0]!,
+    );
   });
 
   it("does not replace a computer on authentication or network errors", async () => {
@@ -210,6 +475,20 @@ describe("Railway computers", () => {
     );
   });
 
+  it("reports output truncation as a command failure", async () => {
+    sandbox.exec.mockResolvedValue({ exitCode: 0, stdout: "partial", truncated: true });
+    await expect(
+      provider
+        .execute(computer, { argv: ["echo", "output"] }, ctx)
+        [Symbol.asyncIterator]()
+        .next(),
+    ).rejects.toThrow("command output exceeds");
+    expect(sandbox.exec).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ maxOutputBytes: 16 * 1024 * 1024 }),
+    );
+  });
+
   it("protects screen sockets with a per-screen token", async () => {
     sandbox.exec.mockResolvedValue({
       stdout: "RAKAZO_DESKTOP=0:screen-token",
@@ -224,9 +503,43 @@ describe("Railway computers", () => {
     );
     if (!screen.url) throw new Error("missing screen URL");
     const url = new URL(screen.url);
-    expect(url.origin).toBe("https://screen.example.test");
+    expect(url.origin).toBe("https://screen-test.up.railway.app");
     expect(url.searchParams.get("path")).toBe("websockify?token=screen-token");
     expect(url.searchParams.has("token")).toBe(false);
+  });
+
+  it.each([
+    "127.0.0.1",
+    "localhost",
+    "other.example.test",
+    "screen.up.railway.app@127.0.0.1",
+    "screen.up.railway.app/redirect",
+    "screen.up.railway.app:80",
+    "screen.up.railway.app.evil.example.test",
+  ])("rejects an untrusted screen domain %s", async (domain) => {
+    vi.mocked(Sandbox.connect).mockResolvedValue({
+      ...sandbox,
+      domains: [{ port: 6080, domain }],
+    } as unknown as Sandbox);
+    sandbox.exec.mockResolvedValue({ stdout: "RAKAZO_DESKTOP=0:screen-token", exitCode: 0 });
+    await expect(
+      provider.connectScreen(computer, { view: "stream", interactive: false }, ctx),
+    ).rejects.toThrow("Invalid Railway screen domain");
+  });
+
+  it("does not allocate a replacement when deletion fails", async () => {
+    vi.mocked(Sandbox.connect).mockResolvedValue({
+      ...sandbox,
+      status: "FAILED",
+    } as unknown as Sandbox);
+    sandbox.destroy.mockRejectedValueOnce(new Error("deletion failed"));
+    await expect(
+      provider.provision(
+        { botId: "bot", homePath: "/unused", providerRef: "old", providerKind: "railway" },
+        ctx,
+      ),
+    ).rejects.toThrow("deletion failed");
+    expect(Sandbox.create).not.toHaveBeenCalled();
   });
 
   it("rejects oversized files instead of returning truncated content", async () => {
